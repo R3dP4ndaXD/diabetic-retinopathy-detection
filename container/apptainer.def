@@ -25,9 +25,9 @@ From: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
     python -m pip install --upgrade pip setuptools wheel
     python -m pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cu121 \
-        torch==2.2.1 \
-        torchvision==0.17.1 \
-        torchaudio==2.2.1
+        torch==2.2.2 \
+        torchvision==0.17.2 \
+        torchaudio==2.2.2
     python -m pip install --no-cache-dir -r /opt/requirements.apptainer.txt
 
 %environment
@@ -44,7 +44,7 @@ From: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
     Author GitHub-Copilot
     Project diabetic-retinopathy-detection
     CUDA 12.1.1
-    PyTorch 2.2.1
+    PyTorch 2.2.2
 
 %help
     This image is intended for Slurm GPU jobs launched with Apptainer --nv.

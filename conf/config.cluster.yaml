@@ -6,6 +6,7 @@
 # Image paths inside the CSVs use /data/... (bind-mounted from DATASET_SRC_DIR at runtime).
 train_csv_path: data/diabetic-retinopathy-dataset/train.csv
 val_csv_path: data/diabetic-retinopathy-dataset/val.csv
+test_csv_path: data/diabetic-retinopathy-dataset/test.csv
 
 # experiment:
 seed: 42

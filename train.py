@@ -28,6 +28,7 @@ def train(cfg: DictConfig) -> None:
     dm = DRDataModule(
         train_csv_path=cfg.train_csv_path,
         val_csv_path=cfg.val_csv_path,
+        test_csv_path=cfg.get("test_csv_path"),
         image_size=cfg.image_size,
         batch_size=cfg.batch_size,
         num_workers=cfg.num_workers,
@@ -78,6 +79,10 @@ def train(cfg: DictConfig) -> None:
 
     # Train the model
     trainer.fit(model, dm)
+
+    # Evaluate on the test set if available
+    if cfg.get("test_csv_path"):
+        trainer.test(model, datamodule=dm)
 
 
 if __name__ == "__main__":

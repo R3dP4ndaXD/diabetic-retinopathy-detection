@@ -53,6 +53,23 @@ class DRModel(L.LightningModule):
         self.log("val_acc", acc, on_step=True, on_epoch=True, prog_bar=True)
         self.log("val_kappa", kappa, on_step=True, on_epoch=True, prog_bar=True)
 
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self.model(x)
+        loss = self.criterion(logits, y)
+        preds = torch.argmax(logits, dim=1)
+        acc = accuracy(preds, y, task="multiclass", num_classes=self.num_classes)
+        kappa = cohen_kappa(
+            preds,
+            y,
+            task="multiclass",
+            num_classes=self.num_classes,
+            weights="quadratic",
+        )
+        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test_kappa", kappa, on_step=False, on_epoch=True, prog_bar=True)
+
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(), lr=self.learning_rate, weight_decay=0.05

@@ -13,6 +13,7 @@ class DRDataModule(L.LightningDataModule):
         self,
         train_csv_path,
         val_csv_path,
+        test_csv_path=None,
         image_size: int = 224,
         batch_size: int = 8,
         num_workers: int = 4,
@@ -31,6 +32,7 @@ class DRDataModule(L.LightningDataModule):
 
         self.train_csv_path = train_csv_path
         self.val_csv_path = val_csv_path
+        self.test_csv_path = test_csv_path
         self.use_class_weighting = use_class_weighting
         self.use_weighted_sampler = use_weighted_sampler
 
@@ -55,12 +57,17 @@ class DRDataModule(L.LightningDataModule):
         )
 
     def setup(self, stage=None):
-        """Set up datasets for training and validation."""
+        """Set up datasets for training, validation, and optionally test."""
         # Initialize datasets with specified transformations
         self.train_dataset = DRDataset(
             self.train_csv_path, transform=self.train_transform
         )
         self.val_dataset = DRDataset(self.val_csv_path, transform=self.val_transform)
+
+        if self.test_csv_path:
+            self.test_dataset = DRDataset(
+                self.test_csv_path, transform=self.val_transform
+            )
 
         # Compute number of classes and class weights
         labels = self.train_dataset.labels.numpy()
@@ -89,6 +96,11 @@ class DRDataModule(L.LightningDataModule):
     def val_dataloader(self):
         return DataLoader(
             self.val_dataset, batch_size=self.batch_size, num_workers=self.num_workers
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset, batch_size=self.batch_size, num_workers=self.num_workers
         )
 
     def _compute_class_weights(self, labels):
