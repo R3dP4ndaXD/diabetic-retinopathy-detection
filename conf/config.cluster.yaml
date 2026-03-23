@@ -1,0 +1,24 @@
+# Cluster-specific config for Slurm + Apptainer runs
+# Use with: python train.py --config-path=../conf --config-name=config.cluster
+# Or override individual paths when submitting: python train.py --config-name=config.cluster
+
+# data: CSV files are stored in the project dir (generated on FEP with /data paths).
+# Image paths inside the CSVs use /data/... (bind-mounted from DATASET_SRC_DIR at runtime).
+train_csv_path: data/diabetic-retinopathy-dataset/train.csv
+val_csv_path: data/diabetic-retinopathy-dataset/val.csv
+
+# experiment:
+seed: 42
+batch_size: 128
+num_workers: 32
+use_class_weighting: true
+use_weighted_sampler: false
+model_name: "densenet169"
+max_epochs: 20
+image_size: 224
+learning_rate: 3e-4
+use_scheduler: true
+
+# output: Use project-local paths (will be bind-mounted in container)
+logs_dir: logs
+checkpoint_dirpath: artifacts/checkpoints

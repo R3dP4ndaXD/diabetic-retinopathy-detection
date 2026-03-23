@@ -35,10 +35,14 @@ download_file() {
     kaggle competitions download -c diabetic-retinopathy-detection -f "$1" -p "$DATASET_DIR"
 
     local zip_file="$DATASET_DIR/$1"
-    
-    # If .zip extension not present in $1, append it
-    if [[ "$1" != *.zip ]]; then
-        zip_file="$zip_file.zip"
+
+    # Multipart archives such as train.zip.001 must be merged later.
+    if [[ "$1" =~ \.zip\.[0-9]+$ ]]; then
+        if [ ! -f "$zip_file" ]; then
+            echo "Error: $zip_file does not exist."
+            return 1
+        fi
+        return 0
     fi
 
     # Check if zip file exists

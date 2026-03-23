@@ -1,0 +1,53 @@
+Bootstrap: docker
+From: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+%files
+    container/requirements.apptainer.txt /opt/requirements.apptainer.txt
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        python3 \
+        python3-pip \
+        python3-venv
+    rm -rf /var/lib/apt/lists/*
+
+    ln -sf /usr/bin/python3 /usr/bin/python
+
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        torch==2.2.1 \
+        torchvision==0.17.1 \
+        torchaudio==2.2.1
+    python -m pip install --no-cache-dir -r /opt/requirements.apptainer.txt
+
+%environment
+    export LC_ALL=C
+    export LANG=C
+    export PYTHONUNBUFFERED=1
+    export MPLBACKEND=Agg
+
+%runscript
+    cd /workspace
+    exec python "$@"
+
+%labels
+    Author GitHub-Copilot
+    Project diabetic-retinopathy-detection
+    CUDA 12.1.1
+    PyTorch 2.2.1
+
+%help
+    This image is intended for Slurm GPU jobs launched with Apptainer --nv.
+    The project repository should be bind-mounted at /workspace.
+    Example:
+      apptainer exec --nv --bind /path/to/repo:/workspace image.sif python train.py

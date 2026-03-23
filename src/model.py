@@ -72,7 +72,6 @@ class DRModel(L.LightningModule):
                 mode="min",  # or "max" if you're maximizing a metric
                 factor=0.1,  # factor by which the learning rate will be reduced
                 patience=5,  # number of epochs with no improvement after which learning rate will be reduced
-                verbose=True,  # print a message when learning rate is reduced
                 threshold=0.001,  # threshold for measuring the new optimum, to only focus on significant changes
             )
 

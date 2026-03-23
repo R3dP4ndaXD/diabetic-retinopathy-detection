@@ -12,17 +12,7 @@ license: mit
 
 # Diabetic Retinopathy Detection: Utilizing Multiprocessing for Processing Large Datasets and Transfer Learning to Fine-Tune Deep Learning Models
 
-<a target="_blank" href="https://lightning.ai/bhimrajyadav/studios/diabetic-retinopathy-detection-utilizing-multiprocessing-for-processing-large-datasets-and-transfer-learning-to-fine-tune-deep-learning-models">
-  <img src="https://pl-bolts-doc-images.s3.us-east-2.amazonaws.com/app-2/studio-badge.svg" alt="Open In Studio"/>
-</a>
-
-[![DOI](https://zenodo.org/badge/776835743.svg)](https://doi.org/10.5281/zenodo.15362035)
-
-
 Efficiently process large datasets & develop advanced model pipelines for diabetic retinopathy detection. Streamlining diagnosis.
-
-![diabetic-retinopathy-detection](https://github.com/bhimrazy/diabetic-retinopathy-detection/assets/46085301/bb45b4cf-9441-435f-819a-176226e1ac00)
-
 
 ## TL;DR: 
 In this project, large datasets are efficiently handled by downloading, extracting, and preparing them for analysis. Utilizing PyTorch Lightning, a robust system for diabetic retinopathy detection is developed, categorizing images into distinct disease stages. The model pipeline is enriched with various pretrained backbone models, with progress tracked using TensorBoard. Furthermore, a user-friendly web app is created to showcase the model's capabilities. The approach pursued aims to streamline both data processing and model development, facilitating accurate and accessible diabetic retinopathy diagnosis.
@@ -114,6 +104,62 @@ python scripts/split_dataset.py
 
 In the previous section, we covered how to set up your dataset and configure your training pipeline using a `Config` class. Now, let's dive into training your model and monitoring its progress using TensorBoard.
 
+### Important: Working with Cluster Home Directory Limits
+
+If your cluster caps the home directory (e.g. 50GB), preprocess the dataset **locally** and sync only the smaller preprocessed images to the cluster login node. Jobs then stage those images onto compute-node local disk (`$TMPDIR`) at runtime, which is outside the home quota.
+
+**Step 1 — Preprocess locally** (on your development machine):
+
+```bash
+# Download the raw dataset
+./scripts/download-dr-dataset.sh
+
+# # Merge and extract the parts
+./scripts/merge_and_extract.sh
+
+# Crop and resize images to 512×512 (only train set is needed for training)
+python scripts/crop_and_resize.py \
+  --src  data/diabetic-retinopathy-dataset/train \
+  --dest data/diabetic-retinopathy-dataset/resized/train
+```
+
+**Step 2 — Sync preprocessed images to FEP** (~3–8 GB, fits in home quota):
+
+```bash
+./scripts/sync_dataset_to_fep.sh
+```
+
+This syncs `data/diabetic-retinopathy-dataset/resized/` and `trainLabels.csv` to `~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset/` on FEP, mirroring your local project layout. Raw images are not transferred.
+
+**Step 3 — Generate train/val CSV splits on FEP** (run once, inside the container):
+
+```bash
+ssh fep
+cd ~/diabetic-retinopathy-detection
+apptainer exec --nv \
+  --bind ~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset:/data \
+  --bind ~/diabetic-retinopathy-detection:/workspace \
+  --pwd /workspace \
+  ~/apptainer-images/dr-detection-cu121.sif \
+  python scripts/split_dataset.py \
+    --data_dir /data/resized/train \
+    --csv_path /data/trainLabels.csv \
+    --train_csv_path data/diabetic-retinopathy-dataset/train.csv \
+    --val_csv_path data/diabetic-retinopathy-dataset/val.csv
+```
+
+This writes `data/diabetic-retinopathy-dataset/train.csv` and `val.csv` into the project directory with image paths that match the `/data` bind-mount used at training time.
+
+**Step 4 — Submit training jobs**:
+
+```bash
+export APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu121.sif
+export DATASET_SRC_DIR=~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset
+./scripts/submit_slurm_apptainer.sh
+```
+
+At runtime the Slurm batch job stages `~/dr-dataset` into `$TMPDIR/dr-dataset` on the compute node's local disk (not counted against home quota) and binds it as `/data` inside the container.
+
 ### Exploring Data Transformations and Augmentations
 
 If you're looking for examples of data transformations and augmentations, you can explore the provided `notebook.ipynb` file. This notebook contains various examples of data preprocessing techniques, such as resizing, cropping, rotation, and more.
@@ -136,6 +182,83 @@ python train.py
 ```
 
 This command will execute the training script and start training your model based on the parameters specified in your `Config` class.
+
+### Training on a Slurm Cluster with Apptainer
+
+If your cluster requires jobs to run inside an Apptainer image, build the image locally, sync both the repository and the `.sif` file to the login node, then submit through Slurm from there.
+
+1. Build the Apptainer image locally:
+
+```bash
+./scripts/build_apptainer_local.sh
+```
+
+This builds [container/apptainer.def](container/apptainer.def) into `container/build/dr-detection-cu121.sif` by default. The image includes CUDA 12.1 user-space libraries and installs the Python dependencies needed by this repository.
+
+2. Sync the repository to the cluster login node:
+
+```bash
+./scripts/sync_to_fep.sh
+```
+
+3. Sync the image to the login node:
+
+```bash
+./scripts/sync_apptainer_to_fep.sh
+```
+
+4. SSH to the login node and move into the synced project:
+
+```bash
+ssh fep
+cd ~/diabetic-retinopathy-detection
+```
+
+5. Submit a GPU training job using the synced image:
+
+```bash
+export APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu121.sif
+./scripts/submit_slurm_apptainer.sh
+```
+
+6. Pass Hydra overrides directly to the submit script when needed:
+
+```bash
+export APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu121.sif
+PARTITION=dgxa100 \
+GRES=gpu:1 \
+CPUS_PER_TASK=16 \
+MEMORY=64G \
+TIME_LIMIT=12:00:00 \
+./scripts/submit_slurm_apptainer.sh batch_size=64 num_workers=16 model_name=resnet50
+```
+
+The submission wrapper calls `sbatch`, and the batch job runs:
+
+```bash
+apptainer exec --nv ... python train.py ...
+```
+
+Useful environment variables for cluster submission:
+
+- `APPTAINER_IMAGE`: required path to the `.sif` image
+- `PARTITION`: Slurm partition, defaults to `dgxa100`
+- `GRES`: GPU request, defaults to `gpu:1`
+- `CPUS_PER_TASK`: CPU cores, defaults to `8`
+- `MEMORY`: RAM request, defaults to `32G`
+- `TIME_LIMIT`: walltime, defaults to `11:00:00`
+- `ACCOUNT`: optional Slurm account
+- `QOS`: optional Slurm QoS
+- `APPTAINER_EXTRA_BINDS`: optional extra bind mounts, comma-separated
+
+Slurm stdout and stderr are written under `slurm/` in the project directory.
+
+Useful environment variables for local image builds:
+
+- `BUILD_MODE`: `fakeroot` by default, or `sudo`
+- `IMAGE_NAME`: output image base name, defaults to `dr-detection-cu121`
+- `OUTPUT_DIR`: output folder, defaults to `container/build`
+- `APPTAINER_DEF`: alternate definition file path
 
 ### Monitoring Training Progress with TensorBoard
 
@@ -178,28 +301,5 @@ Use the interactive interface below to upload retinal images and get predictions
 3. Once the image is uploaded, the model will process it and provide predictions on the severity of diabetic retinopathy.
 4. Interpret the results provided by the model.
 
-## 📖 Citation
 
-If you use this repository or the associated blog in your work, please cite it as:
-
-```bibtex
-@misc{yadav2024drdetection,
-  author       = {Bhimraj Yadav},
-  title        = {Diabetic Retinopathy Detection Utilizing Multiprocessing for Processing Large Datasets and Transfer Learning to Fine-Tune Deep Learning Models},
-  year         = {2024},
-  version      = {0.1.0},
-  doi          = {10.5281/zenodo.15362036},
-  howpublished = {\url{https://github.com/bhimrazy/diabetic-retinopathy-detection}},
-  note         = {Blog: \url{https://lightning.ai/bhimrajyadav/studios/diabetic-retinopathy-detection-utilizing-multiprocessing-for-processing-large-datasets-and-transfer-learning-to-fine-tune-deep-learning-models}}
-}
-```
-
-## License
-
-[MIT](./LICENSE)
-
-
-## Author
-
-- [@bhimrazy](https://www.github.com/bhimrazy)
 
