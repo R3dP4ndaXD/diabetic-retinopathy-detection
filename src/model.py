@@ -1,7 +1,7 @@
 import lightning as L
 import torch
 from torch import nn
-from torchmetrics.functional import accuracy, cohen_kappa
+from torchmetrics.functional import accuracy, cohen_kappa, f1_score, precision, recall
 from src.models.factory import ModelFactory
 
 
@@ -36,39 +36,35 @@ class DRModel(L.LightningModule):
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
+    def _compute_metrics(self, preds, y):
+        metric_args = dict(task="multiclass", num_classes=self.num_classes)
+        return {
+            "acc": accuracy(preds, y, **metric_args),
+            "kappa": cohen_kappa(preds, y, **metric_args, weights="quadratic"),
+            "precision": precision(preds, y, **metric_args, average="macro"),
+            "recall": recall(preds, y, **metric_args, average="macro"),
+            "f1": f1_score(preds, y, **metric_args, average="macro"),
+        }
+
     def validation_step(self, batch, batch_idx):
         x, y = batch
         logits = self.model(x)
         loss = self.criterion(logits, y)
         preds = torch.argmax(logits, dim=1)
-        acc = accuracy(preds, y, task="multiclass", num_classes=self.num_classes)
-        kappa = cohen_kappa(
-            preds,
-            y,
-            task="multiclass",
-            num_classes=self.num_classes,
-            weights="quadratic",
-        )
+        metrics = self._compute_metrics(preds, y)
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("val_acc", acc, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("val_kappa", kappa, on_step=True, on_epoch=True, prog_bar=True)
+        for name, value in metrics.items():
+            self.log(f"val_{name}", value, on_step=True, on_epoch=True, prog_bar=(name in ("acc", "kappa")))
 
     def test_step(self, batch, batch_idx):
         x, y = batch
         logits = self.model(x)
         loss = self.criterion(logits, y)
         preds = torch.argmax(logits, dim=1)
-        acc = accuracy(preds, y, task="multiclass", num_classes=self.num_classes)
-        kappa = cohen_kappa(
-            preds,
-            y,
-            task="multiclass",
-            num_classes=self.num_classes,
-            weights="quadratic",
-        )
+        metrics = self._compute_metrics(preds, y)
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("test_acc", acc, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("test_kappa", kappa, on_step=False, on_epoch=True, prog_bar=True)
+        for name, value in metrics.items():
+            self.log(f"test_{name}", value, on_step=False, on_epoch=True, prog_bar=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
