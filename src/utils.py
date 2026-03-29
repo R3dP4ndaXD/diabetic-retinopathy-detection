@@ -9,17 +9,89 @@ from PIL import Image, ImageOps
 from zoneinfo import ZoneInfo
 
 
-def crop_and_pad_image(image_path, threshold=20, target_size=(512, 512)):
-    """
-    Crop and pad an image to a square with the specified target size.
+def compute_laplacian_variance(image_path, crop_threshold=10):
+    """Compute the Laplacian variance of an image (edge/sharpness measure).
+
+    The black background is cropped first so the retina-to-background edge
+    doesn't dominate the variance.
 
     Args:
         image_path (str): Path to the input image file.
-        threshold (int): Threshold value for binarizing the image.
-        target_size (tuple): Target size of the output image (width, height).
+        crop_threshold (int): Binary threshold for background removal.
 
     Returns:
-        PIL.Image.Image: Cropped and padded image.
+        float: Variance of the Laplacian. Low = blurry, very high = corrupted.
+    """
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Could not load image: {image_path}")
+
+    # Crop out the black background before computing the Laplacian
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    _, binary = cv2.threshold(gray, crop_threshold, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+        gray = gray[y : y + h, x : x + w]
+
+    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+
+def preprocess_image(image_path, threshold=10, target_size=(512, 512)):
+    """Preprocess a retinal fundus image with the following pipeline:
+
+    1. Background crop via binary thresholding + contour bounding box
+    2. Gaussian blur (3x3) for denoising
+    3. Histogram equalization on the Y (luminance) channel in YUV space
+    4. Resize to target_size
+
+    Args:
+        image_path (str): Path to the input image file.
+        threshold (int): Binary threshold for background segmentation.
+        target_size (tuple): Target (width, height) for the output image.
+
+    Returns:
+        PIL.Image.Image: Preprocessed image ready to be saved.
+    """
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"Could not load image: {image_path}")
+
+    # 1. Background crop
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        raise ValueError(f"No foreground found in image: {image_path}")
+    x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    cropped = image[y : y + h, x : x + w]
+
+    # 2. Gaussian blur (3x3)
+    blurred = cv2.GaussianBlur(cropped, (3, 3), 0)
+
+    # 3. Histogram equalization on Y channel (luminance)
+    yuv = cv2.cvtColor(blurred, cv2.COLOR_BGR2YUV)
+    yuv[:, :, 0] = cv2.equalizeHist(yuv[:, :, 0])
+    equalized = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+
+    # 3. CLAHE on Y channel (luminance)
+    # yuv = cv2.cvtColor(blurred, cv2.COLOR_BGR2YUV)
+    # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+
+    # 4. Resize
+    resized = cv2.resize(equalized, target_size, interpolation=cv2.INTER_AREA)
+
+    # Convert BGR → RGB → PIL
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(rgb)
+
+
+def crop_and_pad_image(image_path, threshold=20, target_size=(512, 512)):
+    """Legacy preprocessing: crop black background and pad to square.
+
+    Prefer preprocess_image() for the full pipeline (crop, denoise, hist-eq, resize).
     """
     try:
         # Load the image
@@ -150,18 +222,18 @@ def plot_image_grid(image_paths, roi_crop=False):
     plt.show()
 
 
-def generate_run_id(zone: ZoneInfo = ZoneInfo("Asia/Kathmandu")) -> str:
+def generate_run_id(zone: ZoneInfo = ZoneInfo("Europe/Bucharest")) -> str:
     """Generate a unique run ID using current UTC date and time.
 
     Args:
-        zone (ZoneInfo, optional): Timezone information. Defaults to Indian Standard Time.
+        zone (ZoneInfo, optional): Timezone information. Defaults to Europe/Bucharest.
 
     Returns:
         str: A unique run ID in the format 'run-YYYY-MM-DD-HH-MM-SS'.
     """
     try:
-        current_utc_time = datetime.utcnow().astimezone(zone)
-        formatted_time = current_utc_time.strftime("%Y-%m-%d-%H-%M-%S")
+        now = datetime.now(tz=zone)
+        formatted_time = now.strftime("%Y-%m-%d-%H-%M-%S")
         return f"run-{formatted_time}"
     except Exception as e:
         # Handle exceptions gracefully

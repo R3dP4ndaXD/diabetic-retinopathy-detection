@@ -19,6 +19,9 @@ from src.utils import generate_run_id
 def train(cfg: DictConfig) -> None:
     # generate unique run id based on current date & time
     run_id = generate_run_id()
+    run_tag = cfg.get("run_tag", "")
+    if run_tag:
+        run_id = f"{run_id}-{run_tag}"
 
     # Seed everything for reproducibility
     L.seed_everything(cfg.seed, workers=True)
@@ -32,8 +35,7 @@ def train(cfg: DictConfig) -> None:
         image_size=cfg.image_size,
         batch_size=cfg.batch_size,
         num_workers=cfg.num_workers,
-        use_class_weighting=cfg.use_class_weighting,
-        use_weighted_sampler=cfg.use_weighted_sampler,
+        use_oversampling=cfg.get("use_oversampling", True),
     )
     dm.setup()
 
@@ -42,8 +44,12 @@ def train(cfg: DictConfig) -> None:
         num_classes=dm.num_classes,
         model_name=cfg.model_name,
         learning_rate=cfg.learning_rate,
-        class_weights=dm.class_weights,
+        weight_decay=cfg.get("weight_decay", 1e-4),
         use_scheduler=cfg.use_scheduler,
+        freeze_backbone=cfg.get("freeze_backbone", True),
+        class_weights=dm.class_weights,
+        label_smoothing=cfg.get("label_smoothing", 0.0),
+        warmup_epochs=cfg.get("warmup_epochs", 0),
     )
 
     # Init logger
@@ -63,7 +69,7 @@ def train(cfg: DictConfig) -> None:
     # early stopping
     early_stopping = EarlyStopping(
         monitor="val_loss",
-        patience=10,
+        patience=7,
         verbose=True,
         mode="min",
     )
@@ -73,6 +79,7 @@ def train(cfg: DictConfig) -> None:
         max_epochs=cfg.max_epochs,
         accelerator="auto",
         devices="auto",
+        precision=cfg.get("precision", "32-true"),
         logger=logger,
         callbacks=[checkpoint_callback, lr_monitor, early_stopping],
     )
@@ -82,6 +89,10 @@ def train(cfg: DictConfig) -> None:
 
     # Evaluate on the test set if available
     if cfg.get("test_csv_path"):
+        # Load best checkpoint before testing
+        best_ckpt_path = checkpoint_callback.best_model_path
+        if best_ckpt_path:
+            model = DRModel.load_from_checkpoint(best_ckpt_path)
         trainer.test(model, datamodule=dm)
 
 

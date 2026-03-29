@@ -49,6 +49,17 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional path to save per-image predictions CSV.",
     )
+    parser.add_argument(
+        "--tta",
+        action="store_true",
+        help="Enable test-time augmentation (average predictions over multiple augmented views).",
+    )
+    parser.add_argument(
+        "--tta-runs",
+        type=int,
+        default=5,
+        help="Number of augmented views per image when TTA is enabled.",
+    )
     return parser.parse_args()
 
 
@@ -76,6 +87,12 @@ def main() -> None:
 
     model = DRModel.load_from_checkpoint(str(checkpoint_path))
 
+    # Enable TTA if requested
+    if args.tta:
+        model.tta_enabled = True
+        model.tta_runs = args.tta_runs
+        print(f"TTA enabled with {args.tta_runs} augmented views per image")
+
     trainer = L.Trainer(
         accelerator="auto",
         devices="auto",
@@ -97,8 +114,19 @@ def main() -> None:
         with torch.inference_mode():
             for images, labels in dm.test_dataloader():
                 images = images.to(device)
-                logits = model(images)
-                preds = torch.argmax(logits, dim=1).cpu().tolist()
+
+                if args.tta:
+                    avg_probs = torch.zeros(images.size(0), model.num_classes, device=device)
+                    for _ in range(args.tta_runs):
+                        augmented = model._tta_transform(images)
+                        logits = model(augmented)
+                        avg_probs += torch.softmax(logits, dim=1)
+                    avg_probs /= args.tta_runs
+                    preds = torch.argmax(avg_probs, dim=1).cpu().tolist()
+                else:
+                    logits = model(images)
+                    preds = torch.argmax(logits, dim=1).cpu().tolist()
+
                 labels = labels.tolist()
                 for pred, label in zip(preds, labels):
                     all_rows.append({"label": label, "prediction": pred})

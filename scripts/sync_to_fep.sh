@@ -22,6 +22,8 @@ rsync -avz --delete \
     --exclude 'data/' \
     --exclude 'artifacts/' \
     --exclude 'container/build/' \
+    --exclude 'slurm/' \
+    --exclude 'outputs/' \
     -e ssh \
     "${LOCAL_DIR}/" "${REMOTE_HOST}:${REMOTE_BASE_DIR}/"
 

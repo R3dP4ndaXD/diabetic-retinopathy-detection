@@ -19,7 +19,7 @@ mkdir -p "${PROJECT_DIR}/logs" "${PROJECT_DIR}/artifacts" "${PROJECT_DIR}/slurm"
 
 # Stage dataset to $TMPDIR (local compute node disk, not counted against home quota)
 if [[ -n "${DATASET_SRC_DIR}" && -z "${DATASET_DIR}" ]]; then
-    STAGE_DIR="${TMPDIR:-/tmp}/dr-dataset"
+    STAGE_DIR="${TMPDIR:-/tmp}/dr-dataset-${SLURM_JOB_ID:-$$}"
     echo "Staging dataset from ${DATASET_SRC_DIR} to ${STAGE_DIR} ..."
     mkdir -p "${STAGE_DIR}"
     rsync -a --info=progress2 "${DATASET_SRC_DIR}/" "${STAGE_DIR}/"

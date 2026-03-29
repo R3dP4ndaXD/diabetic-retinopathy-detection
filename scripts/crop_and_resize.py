@@ -8,7 +8,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.concurrent_task_executor import concurrent_task_executor
-from src.utils import crop_and_pad_image, track_files
+from src.utils import compute_laplacian_variance, preprocess_image, track_files
 
 from typing import NamedTuple, Tuple
 
@@ -34,20 +34,55 @@ parser.add_argument(
     action="store_true",
     help="Skip files that already exist in destination.",
 )
+parser.add_argument(
+    "--filter-blurry",
+    action="store_true",
+    help="Filter out blurry/corrupted images using the Laplacian variance.",
+)
+parser.add_argument(
+    "--laplacian-low",
+    type=float,
+    default=10.0,
+    help="Minimum Laplacian variance — images below this are too blurry.",
+)
+parser.add_argument(
+    "--laplacian-high",
+    type=float,
+    default=10000.0,
+    help="Maximum Laplacian variance — images above this are likely corrupted.",
+)
+parser.add_argument(
+    "--filtered-log",
+    type=str,
+    default="",
+    help="Path to write filtered-out image paths (one per line).",
+)
 
 
 class FileInfo(NamedTuple):
     src: str
     dest: str
     size: Tuple[int, int]  # (width, height) tuple.
+    filter_blurry: bool
+    laplacian_low: float
+    laplacian_high: float
 
 
-def crop_and_save_image(file_info: FileInfo):
+# Shared list for filtered-out paths (written at the end, not per-worker)
+_filtered_out: list[str] = []
+
+
+def preprocess_and_save(file_info: FileInfo):
     try:
-        if os.path.exists(file_info.dest):
-            return
-        cropped_image = crop_and_pad_image(file_info.src, target_size=file_info.size)
-        cropped_image.save(file_info.dest)
+        # Laplacian quality filter (on the raw source image)
+        if file_info.filter_blurry:
+            variance = compute_laplacian_variance(file_info.src)
+            if variance < file_info.laplacian_low or variance > file_info.laplacian_high:
+                _filtered_out.append(file_info.src)
+                return
+
+        result = preprocess_image(file_info.src, target_size=file_info.size)
+        result.save(file_info.dest)
     except Exception as e:
         print(f"Error processing image: {str(e)}")
 
@@ -67,7 +102,10 @@ if __name__ == "__main__":
         FileInfo(
             src_image_path,
             os.path.join(dst_folder, os.path.basename(src_image_path)),
-            size
+            size,
+            args.filter_blurry,
+            args.laplacian_low,
+            args.laplacian_high,
         )
         for src_image_path in track_files(src_folder)
     ]
@@ -76,10 +114,24 @@ if __name__ == "__main__":
         files = [file_info for file_info in files if not os.path.exists(file_info.dest)]
 
     print(f"Processing {len(files)} images with {args.workers} workers...")
-    # cropping and resizing images and saving them to the destination folder
+    if args.filter_blurry:
+        print(f"Laplacian filter enabled: keeping variance in [{args.laplacian_low}, {args.laplacian_high}]")
+
     concurrent_task_executor(
-        crop_and_save_image,
+        preprocess_and_save,
         files,
         max_workers=args.workers,
         description="Processing images",
     )
+
+    if args.filter_blurry and _filtered_out:
+        print(f"Filtered out {len(_filtered_out)} images")
+        # Remove destination files for filtered-out source images
+        for src_path in _filtered_out:
+            dest_path = os.path.join(dst_folder, os.path.basename(src_path))
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+        if args.filtered_log:
+            with open(args.filtered_log, "w") as f:
+                f.write("\n".join(_filtered_out) + "\n")
+            print(f"Wrote filtered paths to {args.filtered_log}")

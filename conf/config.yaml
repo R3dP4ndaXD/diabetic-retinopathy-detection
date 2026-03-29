@@ -1,19 +1,28 @@
-# data:
+# Cluster-specific config for Slurm + Apptainer runs
+
+# data: CSV files are stored in the project dir (generated on FEP with /data paths).
+# Image paths inside the CSVs use /data/... (bind-mounted from DATASET_SRC_DIR at runtime).
 train_csv_path: data/diabetic-retinopathy-dataset/train.csv
 val_csv_path: data/diabetic-retinopathy-dataset/val.csv
 test_csv_path: data/diabetic-retinopathy-dataset/test.csv
 
 # experiment:
 seed: 42
-batch_size: 128
+batch_size: 64
 num_workers: 8
-use_class_weighting: true
-use_weighted_sampler: false  # class weighting and weighted sampler are mutually exclusive
-model_name: "resnet50"
-max_epochs: 20
-image_size: 224
-learning_rate: 3e-4
+model_name: "efficientnet-b2"
+max_epochs: 30
+image_size: 260
+learning_rate: 4e-5
+weight_decay: 1e-4
+label_smoothing: 0.0
 use_scheduler: true
+warmup_epochs: 3
+freeze_backbone: false
+balancing_mode: "weighted_loss"  # options: naive_oversample, weighted_sampler, weighted_loss
+precision: "bf16-mixed"
+run_tag: "260_weighted-loss2"
 
+# output: Use project-local paths (will be bind-mounted in container)
 logs_dir: logs
 checkpoint_dirpath: artifacts/checkpoints
