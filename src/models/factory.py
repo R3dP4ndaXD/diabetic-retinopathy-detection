@@ -38,6 +38,22 @@ model_mapping = {
         models.vit_b_32,
         {"weights": models.ViT_B_32_Weights.DEFAULT, "family": "vit"},
     ),
+    "swin-t": (
+        models.swin_t,
+        {"weights": models.Swin_T_Weights.DEFAULT, "family": "swin"},
+    ),
+    "swin-s": (
+        models.swin_s,
+        {"weights": models.Swin_S_Weights.DEFAULT, "family": "swin"},
+    ),
+    "swin-b": (
+        models.swin_b,
+        {"weights": models.Swin_B_Weights.DEFAULT, "family": "swin"},
+    ),
+    "swin-v2-b": (
+        models.swin_v2_b,
+        {"weights": models.Swin_V2_B_Weights.DEFAULT, "family": "swin"},
+    ),
     "efficientnet-b0": (    # 224x224 input size
         models.efficientnet_b0,
         {"weights": models.EfficientNet_B0_Weights.DEFAULT, "family": "efficientnet"},
@@ -116,6 +132,8 @@ class Model(nn.Module):
             self.model.fc = self._create_classifier(in_features, num_classes)
         elif model_config["family"] == "vit":
             self.model.heads = self._create_classifier(in_features, num_classes)
+        elif model_config["family"] == "swin":
+            self.model.head = self._create_classifier(in_features, num_classes)
         elif model_config["family"] == "efficientnet":
             self.model.classifier = self._create_classifier(in_features, num_classes)
 
@@ -131,6 +149,8 @@ class Model(nn.Module):
             return self.model.fc.in_features
         elif family == "vit":
             return self.model.heads.head.in_features
+        elif family == "swin":
+            return self.model.head.in_features
         elif family == "efficientnet":
             return self.model.classifier[1].in_features
 

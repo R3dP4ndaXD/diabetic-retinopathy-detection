@@ -126,12 +126,12 @@ ssh fep
 cd ~/diabetic-retinopathy-detection
 
 export APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu121.sif
-export DATASET_SRC_DIR=~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset
+export DATASET_DIR=~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset_ben
 
 ./scripts/submit_slurm_apptainer.sh
 ```
 
-The Slurm batch job stages the dataset into `$TMPDIR` on the compute node, then binds it as `/data` inside the container.
+The Slurm batch job binds the dataset directly as `/data` inside the container (no staging copy to `$TMPDIR`).
 
 After `trainer.fit()` completes, `trainer.test()` runs automatically on the test split and prints `test_loss`, `test_acc`, and `test_kappa`.
 
@@ -153,7 +153,7 @@ TIME_LIMIT=12:00:00 \
 | Variable | Default | Description |
 |---|---|---|
 | `APPTAINER_IMAGE` | *(required)* | Path to `.sif` image |
-| `DATASET_SRC_DIR` | *(required)* | Dataset on login node to stage |
+| `DATASET_DIR` | *(required)* | Dataset path on shared storage to bind as `/data` |
 | `PARTITION` | `dgxa100` | Slurm partition |
 | `GRES` | `gpu:1` | GPU request |
 | `CPUS_PER_TASK` | `8` | CPU cores |
@@ -236,3 +236,8 @@ The labeled Kaggle training set (`trainLabels.csv`) is split into three stratifi
 
 The original Kaggle test set is unlabeled and is not used.
 
+
+
+
+
+ ./scripts/submit_slurm_test_apptainer.sh   --ensemble-checkpoints artifacts/checkpoints/run-2026-03-30-20-26-43-swin_b_naive_oversample/epoch\=10-step\=8877-val_loss\=1.09-val_acc\=0.75-val_kappa\=0.61.ckpt artifacts/checkpoints/run-2026-03-30-18-24-09-resnet50_naive_oversample/epoch\=11-step\=9684-val_loss\=1.32-val_acc\=0.74-val_kappa\=0.55.ckpt artifacts/checkpoints/run-2026-03-30-20-23-09-densenet121_naive_oversample/epoch\=14-step\=12105-val_loss\=1.22-val_acc\=0.75-val_kappa\=0.56.ckpt artifacts/checkpoints/run-2026-03-30-21-21-28-efficientnet_b0_naive_oversample/epoch\=9-step\=8070-val_loss\=1.05-val_acc\=0.67-val_kappa\=0.56.ckpt   --tune-ensemble-weights   --test-csv data/diabetic-retinopathy-dataset_ben_224/test.csv  --val-csv data/diabetic-retinopathy-dataset_ben_224/val.csv --image-size 224

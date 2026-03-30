@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REMOTE_HOST="${REMOTE_HOST:-fep}"
-REMOTE_DATASET_DIR="${REMOTE_DATASET_DIR:-~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset}"
+REMOTE_DATASET_DIR="${REMOTE_DATASET_DIR:-~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset_ben_260}"
 LOCAL_DATASET_DIR="${LOCAL_DATASET_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/data/diabetic-retinopathy-dataset}"
 
 RESIZED_DIR="${LOCAL_DATASET_DIR}/resized"
@@ -63,4 +63,4 @@ echo "      --train_csv_path data/diabetic-retinopathy-dataset/train.csv \\"
 echo "      --val_csv_path data/diabetic-retinopathy-dataset/val.csv"
 echo ""
 echo "Then submit jobs with:"
-echo "  export DATASET_SRC_DIR=~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset"
+echo "  export DATASET_DIR=~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset"

@@ -18,8 +18,10 @@ class DRDataModule(L.LightningDataModule):
         image_size: int = 224,
         batch_size: int = 8,
         num_workers: int = 4,
-        use_oversampling: bool = False,
-        balancing_mode: str = "weighted_loss",  # "naive_oversample", "weighted_sampler", "weighted_loss"
+        balancing_mode: str = "weighted_loss",  # "naive_oversample", "sampler", "weighted_loss"
+        normalization_mode: str = "dataset_by_size",  # "imagenet", "dataset_by_size", "custom"
+        custom_mean=None,
+        custom_std=None,
     ):
         super().__init__()
         self.batch_size = batch_size
@@ -28,24 +30,78 @@ class DRDataModule(L.LightningDataModule):
         self.train_csv_path = train_csv_path
         self.val_csv_path = val_csv_path
         self.test_csv_path = test_csv_path
-        self.use_oversampling = use_oversampling
         self.balancing_mode = balancing_mode
+        self.normalization_mode = normalization_mode
+        self.custom_mean = custom_mean
+        self.custom_std = custom_std
 
         self.sampler = None
 
+        imagenet_mean = [0.485, 0.456, 0.406]
+        imagenet_std = [0.229, 0.224, 0.225]
+        dataset_stats_by_size = {
+            260: {
+                "mean": [0.5157322866781002, 0.5127125195333987, 0.5109832913220571],
+                "std": [0.22462066781120452, 0.20958938594022844, 0.18132136224659612],
+            },
+            512: {
+                "mean": [0.49569857915740306, 0.49564579707226114, 0.4927175974949744],
+                "std": [0.280003501286239, 0.2782336760044972, 0.2515219633188661],
+            },
+             224: {
+                "mean": [0.4798033789035061, 0.4753913263012517, 0.4721207172806979],
+                "std": [0.29983359231305656, 0.28349450929746645, 0.2526360182164682],
+            },
+        }
+
+        if self.normalization_mode == "imagenet":
+            self.dataset_mean = imagenet_mean
+            self.dataset_std = imagenet_std
+        elif self.normalization_mode == "dataset_by_size":
+            if image_size not in dataset_stats_by_size:
+                available = ", ".join(str(k) for k in sorted(dataset_stats_by_size.keys()))
+                raise ValueError(
+                    f"No dataset stats configured for image_size={image_size}. Available sizes: {available}. "
+                    "Use normalization_mode='imagenet' or provide custom_mean/custom_std."
+                )
+            self.dataset_mean = dataset_stats_by_size[image_size]["mean"]
+            self.dataset_std = dataset_stats_by_size[image_size]["std"]
+        elif self.normalization_mode == "custom":
+            if not self.custom_mean or not self.custom_std:
+                raise ValueError(
+                    "custom_mean and custom_std must be provided when normalization_mode='custom'."
+                )
+            if len(self.custom_mean) != 3 or len(self.custom_std) != 3:
+                raise ValueError("custom_mean and custom_std must each have exactly 3 values (RGB).")
+            self.dataset_mean = list(self.custom_mean)
+            self.dataset_std = list(self.custom_std)
+        else:
+            raise ValueError(
+                "Invalid normalization_mode. Expected one of: imagenet, dataset_by_size, custom"
+            )
+        
         # Training augmentations
         self.train_transform = T.Compose(
             [
                 T.Resize((image_size, image_size), antialias=True),
-                T.RandomRotation(degrees=(0, 360), fill=0),
+                # Combine Rotation, Scale, and Shear into one operation to preserve quality.
+                # FILL=[128, 128, 128] is critical to match the new 50% gray background.
+                T.RandomAffine(
+                    degrees=(0, 360),
+                    scale=(0.9, 1.1),
+                    shear=(-11, 11), # Added slight shear mimicking Ben Graham's original paper
+                    fill=[128, 128, 128]
+                ),
                 T.RandomHorizontalFlip(p=0.5),
                 T.RandomVerticalFlip(p=0.5),
-                T.RandomAffine(degrees=0, scale=(0.9, 1.1), fill=0),
-                T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
-                T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
+
+                T.ToImage(),
                 T.ToDtype(torch.float32, scale=True),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-                T.RandomErasing(p=0.3, scale=(0.02, 0.1)),
+
+                T.Normalize(mean=self.dataset_mean, std=self.dataset_std),
+                
+                # RandomErasing value set to roughly 0.5 to drop gray patches instead of black
+                T.RandomErasing(p=0.3, scale=(0.02, 0.1), value=0.5),
             ]
         )
 
@@ -61,20 +117,24 @@ class DRDataModule(L.LightningDataModule):
             T.RandomAdjustSharpness(sharpness_factor=2),
             T.RandomAutocontrast(),
             T.ToDtype(torch.float32, scale=True),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            T.Normalize(mean=self.dataset_mean, std=self.dataset_std),
             T.RandomErasing(p=0.2, scale=(0.05, 0.05), ratio=(0.5, 0.5)),
         ])
         # Val/test: deterministic resize + normalize only
         self.val_transform = T.Compose(
             [
                 T.Resize((image_size, image_size), antialias=True),
+                T.ToImage(),
                 T.ToDtype(torch.float32, scale=True),
-                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                T.Normalize(mean=self.dataset_mean, std=self.dataset_std),
             ]
         )
 
     def setup(self, stage=None):
         """Set up datasets for training, validation, and optionally test."""
+        self.sampler = None
+        self.class_weights = None
+
         train_df = pd.read_csv(self.train_csv_path)
         class_counts = train_df["label"].value_counts()
 
@@ -100,8 +160,7 @@ class DRDataModule(L.LightningDataModule):
             oversampled_csv = self.train_csv_path.replace(".csv", "_oversampled.csv")
             oversampled_df.to_csv(oversampled_csv, index=False)
             self.train_dataset = DRDataset(oversampled_csv, transform=self.train_transform)
-            self.class_weights = None
-        elif self.balancing_mode == "weighted_sampler":
+        elif self.balancing_mode in {"sampler", "weighted_sampler"}:
             self.train_dataset = DRDataset(self.train_csv_path, transform=self.train_transform)
             labels = self.train_dataset.labels.numpy()
             counts = np.bincount(labels)
@@ -110,8 +169,7 @@ class DRDataModule(L.LightningDataModule):
             self.sampler = WeightedRandomSampler(
                 weights=sample_weights, num_samples=len(labels), replacement=True
             )
-            self.class_weights = None
-        else:
+        elif self.balancing_mode == "weighted_loss":
             # No oversampling — compute class weights for the loss function instead
             self.train_dataset = DRDataset(self.train_csv_path, transform=self.train_transform)
             labels = self.train_dataset.labels.numpy()
@@ -119,6 +177,10 @@ class DRDataModule(L.LightningDataModule):
                 class_weight="balanced", classes=np.unique(labels), y=labels
             )
             self.class_weights = torch.tensor(weights, dtype=torch.float32)
+        else:
+            raise ValueError(
+                "Invalid balancing_mode. Expected one of: naive_oversample, sampler, weighted_loss"
+            )
 
         self.val_dataset = DRDataset(self.val_csv_path, transform=self.val_transform)
 

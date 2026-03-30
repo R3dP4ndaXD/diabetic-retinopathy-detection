@@ -1,27 +1,44 @@
 # Cluster-specific config for Slurm + Apptainer runs
 
 # data: CSV files are stored in the project dir (generated on FEP with /data paths).
-# Image paths inside the CSVs use /data/... (bind-mounted from DATASET_SRC_DIR at runtime).
+# Image paths inside the CSVs use /data/... (bind-mounted from DATASET_DIR at runtime).
 train_csv_path: data/diabetic-retinopathy-dataset/train.csv
 val_csv_path: data/diabetic-retinopathy-dataset/val.csv
 test_csv_path: data/diabetic-retinopathy-dataset/test.csv
 
 # experiment:
 seed: 42
-batch_size: 64
 num_workers: 8
-model_name: "efficientnet-b2"
-max_epochs: 30
-image_size: 260
-learning_rate: 4e-5
 weight_decay: 1e-4
 label_smoothing: 0.0
 use_scheduler: true
-warmup_epochs: 3
-freeze_backbone: false
-balancing_mode: "weighted_loss"  # options: naive_oversample, weighted_sampler, weighted_loss
+loss_name: "cross_entropy"  # options: cross_entropy, focal
+focal_gamma: 2.0
+scheduler_monitor: "val_loss"
+scheduler_monitor_mode: "min"
+checkpoint_monitor: "val_kappa"
+checkpoint_monitor_mode: "max"
+early_stopping_monitor: "val_loss"
+early_stopping_mode: "min"
+tta_enabled: false
+tta_runs: 5
 precision: "bf16-mixed"
-run_tag: "260_weighted-loss2"
+max_epochs: 35
+# custom_mean/std are used only when normalization_mode="custom"
+custom_mean: null
+custom_std: null
+warmup_epochs: 4
+
+batch_size: 128
+learning_rate: 8e-5
+image_size: 224
+model_name: "resnet50"  # options: efficientnet-b2, swin-v2-b, resnet50
+
+balancing_mode: "naive_oversample"  # options: naive_oversample, sampler, weighted_loss
+normalization_mode: "dataset_by_size"  # options: imagenet, dataset_by_size, custom
+freeze_backbone: false
+
+run_tag: "${model_name}_${balancing_mode}" # used for naming checkpoints and logs
 
 # output: Use project-local paths (will be bind-mounted in container)
 logs_dir: logs

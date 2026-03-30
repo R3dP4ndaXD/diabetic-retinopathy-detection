@@ -24,6 +24,12 @@ parser.add_argument(
     default=(512, 512),
 )
 parser.add_argument(
+    "--threshold",
+    type=int,
+    default=10,
+    help="Threshold for background cropping mask.",
+)
+parser.add_argument(
     "--workers",
     type=int,
     default=min(8, cpu_count() or 1),
@@ -57,31 +63,62 @@ parser.add_argument(
     default="",
     help="Path to write filtered-out image paths (one per line).",
 )
+parser.add_argument(
+    "--use-clahe",
+    action="store_true",
+    help="Use CLAHE on the L channel of the LAB color space.",
+)
+parser.add_argument(
+    "--clahe-clip-limit",
+    type=float,
+    default=2.0,
+    help="CLAHE clip limit.",
+)
+parser.add_argument(
+    "--clahe-tile-grid",
+    type=int,
+    nargs=2,
+    metavar=("W", "H"),
+    default=(8, 8),
+    help="CLAHE tile grid size.",
+)
 
 
 class FileInfo(NamedTuple):
     src: str
     dest: str
     size: Tuple[int, int]  # (width, height) tuple.
+    threshold: int
     filter_blurry: bool
     laplacian_low: float
     laplacian_high: float
+    use_clahe: bool
+    clahe_clip_limit: float
+    clahe_tile_grid: Tuple[int, int]
 
 
-# Shared list for filtered-out paths (written at the end, not per-worker)
+# Shared list for filtered-out paths (written at the end, not per-worker)[cite: 3]
 _filtered_out: list[str] = []
 
 
 def preprocess_and_save(file_info: FileInfo):
     try:
-        # Laplacian quality filter (on the raw source image)
+        # Laplacian quality filter (on the raw source image)[cite: 3]
         if file_info.filter_blurry:
             variance = compute_laplacian_variance(file_info.src)
             if variance < file_info.laplacian_low or variance > file_info.laplacian_high:
                 _filtered_out.append(file_info.src)
                 return
 
-        result = preprocess_image(file_info.src, target_size=file_info.size)
+        # Added threshold parameter to match the updated pipeline
+        result = preprocess_image(
+            file_info.src,
+            threshold=file_info.threshold,
+            target_size=file_info.size,
+            use_clahe=file_info.use_clahe,
+            clahe_clip_limit=file_info.clahe_clip_limit,
+            clahe_tile_grid_size=file_info.clahe_tile_grid,
+        )
         result.save(file_info.dest)
     except Exception as e:
         print(f"Error processing image: {str(e)}")
@@ -93,7 +130,7 @@ if __name__ == "__main__":
     dst_folder = args.dest
     size = tuple(args.size)
 
-    # check if destination folder exists
+    # check if destination folder exists[cite: 3]
     if not os.path.exists(dst_folder):
         print("Destination folder does not exist. Creating folder...")
         os.makedirs(dst_folder, exist_ok=True)
@@ -103,9 +140,13 @@ if __name__ == "__main__":
             src_image_path,
             os.path.join(dst_folder, os.path.basename(src_image_path)),
             size,
+            args.threshold,
             args.filter_blurry,
             args.laplacian_low,
             args.laplacian_high,
+            args.use_clahe,
+            args.clahe_clip_limit,
+            tuple(args.clahe_tile_grid),
         )
         for src_image_path in track_files(src_folder)
     ]
@@ -126,7 +167,7 @@ if __name__ == "__main__":
 
     if args.filter_blurry and _filtered_out:
         print(f"Filtered out {len(_filtered_out)} images")
-        # Remove destination files for filtered-out source images
+        # Remove destination files for filtered-out source images[cite: 3]
         for src_path in _filtered_out:
             dest_path = os.path.join(dst_folder, os.path.basename(src_path))
             if os.path.exists(dest_path):

@@ -38,18 +38,52 @@ def compute_laplacian_variance(image_path, crop_threshold=10):
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
-def preprocess_image(image_path, threshold=10, target_size=(512, 512)):
+def pad_to_square(image, pad_value=0):
+    """Pads an image with a solid color to make it square, preserving aspect ratio."""
+    h, w = image.shape[:2]
+    max_dim = max(h, w)
+    
+    # Calculate padding amounts
+    top = (max_dim - h) // 2
+    bottom = max_dim - h - top
+    left = (max_dim - w) // 2
+    right = max_dim - w - left
+    
+    # Pad with black (0 by default)
+    return cv2.copyMakeBorder(image, top, bottom, left, right, 
+                              cv2.BORDER_CONSTANT, value=[pad_value, pad_value, pad_value])
+
+
+def ben_graham_preprocessing(image, sigmaX=10):
+    """Applies Ben Graham's blending natively to all 3 color channels."""
+    blurred = cv2.GaussianBlur(image, (0, 0), sigmaX)
+    return cv2.addWeighted(image, 4, blurred, -4, 128)
+
+
+def preprocess_image(
+    image_path,
+    threshold=10,
+    target_size=(512, 512),
+    use_clahe=True,
+    clahe_clip_limit=2.0,
+    clahe_tile_grid_size=(8, 8),
+):
     """Preprocess a retinal fundus image with the following pipeline:
 
     1. Background crop via binary thresholding + contour bounding box
-    2. Gaussian blur (3x3) for denoising
-    3. Histogram equalization on the Y (luminance) channel in YUV space
-    4. Resize to target_size
+    2. Pad to square to preserve aspect ratio
+    3. Resize to target_size
+    4. Ben Graham enhancement (local average color subtraction)
+    5. Luminance contrast enhancement on LAB's L channel (CLAHE or global hist-eq)
+    6. Median blur (3x3) for mild denoising
 
     Args:
         image_path (str): Path to the input image file.
         threshold (int): Binary threshold for background segmentation.
         target_size (tuple): Target (width, height) for the output image.
+        use_clahe (bool): If True, use CLAHE. Otherwise, use global equalization.
+        clahe_clip_limit (float): CLAHE clip limit.
+        clahe_tile_grid_size (tuple): CLAHE tile grid size.
 
     Returns:
         PIL.Image.Image: Preprocessed image ready to be saved.
@@ -67,62 +101,38 @@ def preprocess_image(image_path, threshold=10, target_size=(512, 512)):
     x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
     cropped = image[y : y + h, x : x + w]
 
-    # 2. Gaussian blur (3x3)
-    blurred = cv2.GaussianBlur(cropped, (3, 3), 0)
+    # 2. Pad to a perfect square to MAINTAIN ASPECT RATIO
+    squared = pad_to_square(cropped, pad_value=0)
 
-    # 3. Histogram equalization on Y channel (luminance)
-    yuv = cv2.cvtColor(blurred, cv2.COLOR_BGR2YUV)
-    yuv[:, :, 0] = cv2.equalizeHist(yuv[:, :, 0])
-    equalized = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+    # 3. Resize safely (No distortion since the image is already square)
+    resized = cv2.resize(squared, target_size, interpolation=cv2.INTER_AREA)
 
-    # 3. CLAHE on Y channel (luminance)
-    # yuv = cv2.cvtColor(blurred, cv2.COLOR_BGR2YUV)
-    # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    # yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+    # 4. Ben Graham Enhancement
+    enhanced = ben_graham_preprocessing(resized)
 
-    # 4. Resize
-    resized = cv2.resize(equalized, target_size, interpolation=cv2.INTER_AREA)
+    # 5. Luminance enhancement on LAB color space
+    lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    if use_clahe:
+        clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=clahe_tile_grid_size,
+        )
+        cl = clahe.apply(l)
+    else:
+        # Fallback to global equalization if CLAHE is disabled
+        cl = cv2.equalizeHist(l)
+        
+    merged = cv2.merge((cl, a, b))
+    lab_enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+    # 6. Mild Denoising
+    denoised = cv2.medianBlur(lab_enhanced, 3)
 
     # Convert BGR → RGB → PIL
-    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+    rgb = cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB)
     return Image.fromarray(rgb)
-
-
-def crop_and_pad_image(image_path, threshold=20, target_size=(512, 512)):
-    """Legacy preprocessing: crop black background and pad to square.
-
-    Prefer preprocess_image() for the full pipeline (crop, denoise, hist-eq, resize).
-    """
-    try:
-        # Load the image
-        image = Image.open(image_path).convert("RGB")
-    except Exception as e:
-        raise ValueError(f"Error loading image: {str(e)}")
-
-    # Convert the image to a NumPy array
-    image_array = np.array(image)
-
-    # Binarize the image
-    binary_image_array = np.where(image_array > threshold, 1, 0).astype(np.uint8)
-
-    # Find non-zero elements (non-black pixels)
-    non_zero_indices = np.argwhere(binary_image_array)
-
-    # Check if non-zero elements exist
-    if non_zero_indices.size == 0:
-        raise ValueError(f"No non-zero elements found for the image: {image_path}")
-
-    # Get the bounding box of non-zero elements
-    (y1, x1, _), (y2, x2, _) = non_zero_indices.min(0), non_zero_indices.max(0)
-
-    # Crop the Region of Interest (ROI)
-    cropped_img = image.crop((x1, y1, x2, y2))
-
-    # Pad the image to make it a square
-    squared_img = ImageOps.pad(cropped_img, target_size)
-
-    return squared_img
-
 
 def track_files(folder_path, extensions=(".jpg", ".jpeg", ".png")):
     """

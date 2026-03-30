@@ -2,12 +2,12 @@
 Quick visual test for the preprocessing pipeline.
 
 Processes sample images and saves a side-by-side comparison grid
-(original → cropped → denoised → histogram-equalized → final resized)
+(Original → Squared → Ben Graham → CLAHE → Final)
 plus prints Laplacian variance for each image.
 
 Usage:
     python scripts/test_preprocessing.py
-    # Then open artifacts/preprocessing_test.png
+    # Then open artifacts/preprocessing_test.png[cite: 2]
 """
 
 import os
@@ -20,7 +20,7 @@ if PROJECT_ROOT not in sys.path:
 import cv2
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend
+matplotlib.use("Agg")  # non-interactive backend[cite: 2]
 import matplotlib.pyplot as plt
 from PIL import Image
 
@@ -34,8 +34,26 @@ TARGET_SIZE = (512, 512)
 THRESHOLD = 10
 
 
+def pad_to_square(image, pad_value=0):
+    """Pads an image with a solid color to make it square, preserving aspect ratio."""
+    h, w = image.shape[:2]
+    max_dim = max(h, w)
+    
+    top = (max_dim - h) // 2
+    bottom = max_dim - h - top
+    left = (max_dim - w) // 2
+    right = max_dim - w - left
+    
+    return cv2.copyMakeBorder(image, top, bottom, left, right, 
+                              cv2.BORDER_CONSTANT, value=[pad_value, pad_value, pad_value])
+
+def ben_graham_preprocessing_step(image, sigmaX=10):
+    """Applies Ben Graham's blending natively to all 3 color channels."""
+    blurred = cv2.GaussianBlur(image, (0, 0), sigmaX)
+    return cv2.addWeighted(image, 4, blurred, -4, 128)
+
 def preprocessing_stages(image_path, threshold=THRESHOLD, target_size=TARGET_SIZE):
-    """Run each preprocessing step individually and return intermediate results."""
+    """Run each preprocessing step individually and return intermediate results[cite: 2]."""
     image = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"Could not load: {image_path}")
@@ -49,32 +67,36 @@ def preprocessing_stages(image_path, threshold=THRESHOLD, target_size=TARGET_SIZ
     x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
     cropped = image[y : y + h, x : x + w]
 
-    # Stage 2: Gaussian blur
-    blurred = cv2.GaussianBlur(cropped, (3, 3), 0)
+    # Stage 2: Pad to square (Aspect Ratio preserved)
+    squared = pad_to_square(cropped, pad_value=0)
 
-    # Stage 3: Histogram equalization on Y channel
-    yuv = cv2.cvtColor(blurred, cv2.COLOR_BGR2YUV)
-    yuv[:, :, 0] = cv2.equalizeHist(yuv[:, :, 0])
-    equalized = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+    # Stage 3: Resize safely to TARGET_SIZE
+    resized = cv2.resize(squared, target_size, interpolation=cv2.INTER_AREA)
 
-    # Stage 3: CLAHE on Y channel
-    # yuv = cv2.cvtColor(blurred, cv2.COLOR_BGR2YUV)
-    # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    # yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+    # Stage 4: Ben Graham Enhancement
+    enhanced = ben_graham_preprocessing_step(resized)
+
+    # Stage 5: CLAHE on LAB's L channel
+    lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+    merged = cv2.merge((cl, a, b))
+    clahe_bgr = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
     
-    # Stage 4: Resize
-    resized = cv2.resize(equalized, target_size, interpolation=cv2.INTER_AREA)
+    # Stage 6: Mild Denoise
+    denoised = cv2.medianBlur(clahe_bgr, 3)
 
-    # Convert all BGR → RGB for matplotlib
+    # Convert all BGR → RGB for matplotlib[cite: 2]
     def to_rgb(img):
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     return {
         "Original": to_rgb(image),
-        "Cropped": to_rgb(cropped),
-        "Denoised": to_rgb(blurred),
-        "Hist-Eq": to_rgb(equalized),
-        "Final": to_rgb(resized),
+        "Squared": to_rgb(squared),
+        "Ben Graham": to_rgb(enhanced),
+        "CLAHE": to_rgb(clahe_bgr),
+        "Final": to_rgb(denoised),
     }
 
 
@@ -91,9 +113,8 @@ def main():
         print(f"No sample images found in {SAMPLE_DIR}")
         return
 
-    # Use up to 4 images for a manageable grid
-    # sample_files = sample_files[:4]
-    stage_names = ["Original", "Cropped", "Denoised", "Hist-Eq", "Final"]
+    # The new grid stages reflecting the proposed pipeline
+    stage_names = ["Original", "Squared", "Ben Graham", "CLAHE", "Final"]
 
     n_images = len(sample_files)
     n_stages = len(stage_names)
@@ -107,11 +128,11 @@ def main():
     for row, image_path in enumerate(sample_files):
         filename = os.path.basename(image_path)
 
-        # Laplacian variance
+        # Laplacian variance[cite: 2]
         lap_var = compute_laplacian_variance(image_path)
         print(f"{filename}: Laplacian variance = {lap_var:.2f}")
 
-        # Get stages
+        # Get stages[cite: 2]
         stages = preprocessing_stages(image_path)
 
         for col, stage_name in enumerate(stage_names):
@@ -123,7 +144,7 @@ def main():
             if col == 0:
                 ax.set_ylabel(filename, fontsize=10, rotation=0, labelpad=80, va="center")
 
-    # Also verify that preprocess_image() produces a valid PIL image
+    # Also verify that preprocess_image() produces a valid PIL image[cite: 2]
     print("\n--- End-to-end preprocess_image() check ---")
     for image_path in sample_files:
         result = preprocess_image(image_path, target_size=TARGET_SIZE)
