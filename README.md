@@ -237,7 +237,5 @@ The labeled Kaggle training set (`trainLabels.csv`) is split into three stratifi
 The original Kaggle test set is unlabeled and is not used.
 
 
-
-
-
- ./scripts/submit_slurm_test_apptainer.sh   --ensemble-checkpoints artifacts/checkpoints/run-2026-03-30-20-26-43-swin_b_naive_oversample/epoch\=10-step\=8877-val_loss\=1.09-val_acc\=0.75-val_kappa\=0.61.ckpt artifacts/checkpoints/run-2026-03-30-18-24-09-resnet50_naive_oversample/epoch\=11-step\=9684-val_loss\=1.32-val_acc\=0.74-val_kappa\=0.55.ckpt artifacts/checkpoints/run-2026-03-30-20-23-09-densenet121_naive_oversample/epoch\=14-step\=12105-val_loss\=1.22-val_acc\=0.75-val_kappa\=0.56.ckpt artifacts/checkpoints/run-2026-03-30-21-21-28-efficientnet_b0_naive_oversample/epoch\=9-step\=8070-val_loss\=1.05-val_acc\=0.67-val_kappa\=0.56.ckpt   --tune-ensemble-weights   --test-csv data/diabetic-retinopathy-dataset_ben_224/test.csv  --val-csv data/diabetic-retinopathy-dataset_ben_224/val.csv --image-size 224
+./scripts/submit_slurm_test_ensemble_apptainer.sh   --ensemble-checkpoints artifacts/checkpoints/run-2026-03-30-20-26-43-swin_b_naive_oversample/epoch\=10-step\=8877-val_loss\=1.09-val_acc\=0.75-val_kappa\=0.61.ckpt artifacts/checkpoints/run-2026-03-30-18-24-09-resnet50_naive_oversample/epoch\=11-step\=9684-val_loss\=1.32-val_acc\=0.74-val_kappa\=0.55.ckpt artifacts/checkpoints/run-2026-03-30-20-23-09-densenet121_naive_oversample/epoch\=14-step\=12105-val_loss\=1.22-val_acc\=0.75-val_kappa\=0.56.ckpt artifacts/checkpoints/run-2026-03-30-21-21-28-efficientnet_b0_naive_oversample/epoch\=9-step\=8070-val_loss\=1.05-val_acc\=0.67-val_kappa\=0.56.ckpt  artifacts/checkpoints/run-2026-03-30-15-56-31-efficientnet_b2_naive_oversample/epoch\=13-step\=11298-val_loss\=1.28-val_acc\=0.76-val_kappa\=0.62.ckpt   --tune-ensemble-weights   --test-csv data/diabetic-retinopathy-dataset_ben_2
+24/test.csv  --val-csv data/diabetic-retinopathy-dataset_ben_224/val.csv

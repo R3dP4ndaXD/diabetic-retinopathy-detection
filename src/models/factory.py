@@ -1,8 +1,43 @@
-from torchvision import models
 from torch import nn
+from torchvision import models
+
+MODEL_RECOMMENDED_INPUT_SIZES = {
+    "densenet121": 224,
+    "densenet161": 224,
+    "densenet169": 224,
+    "densenet201": 224,
+    "resnet50": 224,
+    "resnet101": 224,
+    "resnet152": 224,
+    "vit-b-16": 224,
+    "vit-b-32": 224,
+    "swin-t": 224,
+    "swin-s": 224,
+    "swin-b": 224,
+    "swin-v2-b": 256,
+    "efficientnet-b0": 224,
+    "efficientnet-b1": 240,
+    "efficientnet-b2": 260,
+    "efficientnet-b3": 300,
+    "efficientnet-b4": 380,
+    "efficientnet-b5": 456,
+    "efficientnet-b6": 528,
+    "efficientnet-b7": 600,
+    "efficientnet-v2-s": 384,
+    "efficientnet-v2-m": 480,
+    "efficientnet-v2-l": 480,
+}
+
+
+def get_recommended_input_size(model_name: str) -> int | None:
+    return MODEL_RECOMMENDED_INPUT_SIZES.get(model_name)
+
+
+def get_supported_model_input_sizes() -> dict:
+    return dict(MODEL_RECOMMENDED_INPUT_SIZES)
 
 model_mapping = {
-    "densenet121": (
+    "densenet121": (    
         models.densenet121,
         {"weights": models.DenseNet121_Weights.DEFAULT, "family": "densenet"},
     ),

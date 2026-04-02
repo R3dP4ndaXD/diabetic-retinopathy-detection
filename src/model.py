@@ -6,7 +6,7 @@ from torch import nn
 from torchmetrics.functional import accuracy, cohen_kappa, f1_score, precision, recall
 from torchvision.transforms import v2 as T
 from src.models.factory import ModelFactory
-
+import random
 
 class FocalLoss(nn.Module):
     """Multiclass focal loss with optional class weights."""
@@ -81,9 +81,9 @@ class DRModel(L.LightningModule):
 
         # TTA augmentations (applied on already-normalized tensors)
         self._tta_transform = T.Compose([
-            T.RandomRotation(degrees=(0, 360), fill=0),
             T.RandomHorizontalFlip(p=0.5),
             T.RandomVerticalFlip(p=0.5),
+            T.Lambda(lambda x: torch.rot90(x, k=random.randint(0, 3), dims=[-2, -1]))
         ])
         self._test_preds = []
         self._test_targets = []
