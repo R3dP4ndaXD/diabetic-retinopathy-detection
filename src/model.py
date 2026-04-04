@@ -1,6 +1,7 @@
 import lightning as L
 import torch.nn.functional as F
 import torch
+from pytorch_wavelets import DWTForward
 from sklearn.metrics import classification_report, cohen_kappa_score
 from torch import nn
 from torchmetrics.functional import accuracy, cohen_kappa, f1_score, precision, recall
@@ -14,22 +15,87 @@ class FocalLoss(nn.Module):
     def __init__(self, gamma: float = 2.0, weight=None, label_smoothing: float = 0.0):
         super().__init__()
         self.gamma = gamma
+        self.label_smoothing = label_smoothing
         if weight is not None:
             self.register_buffer("weight", weight)
         else:
             self.weight = None
-        self.label_smoothing = label_smoothing
 
     def forward(self, logits, targets):
-        ce = F.cross_entropy(
+        # Calculate unweighted CE strictly to extract the true probability distribution (pt)
+        ce_unweighted = F.cross_entropy(
+            logits,
+            targets,
+            reduction="none",
+            label_smoothing=self.label_smoothing,
+        )
+        pt = torch.exp(-ce_unweighted)
+
+        # Calculate weighted CE for the actual loss calculation
+        ce_weighted = F.cross_entropy(
             logits,
             targets,
             weight=self.weight,
             reduction="none",
             label_smoothing=self.label_smoothing,
         )
-        pt = torch.exp(-ce)
-        return ((1 - pt) ** self.gamma * ce).mean()
+
+        return ((1 - pt) ** self.gamma * ce_weighted).mean()
+
+
+class WaveletChannelTransform(nn.Module):
+    """Create wavelet channels"""
+
+    def __init__(
+        self,
+        wave: str = "haar",
+        mode: str = "symmetric",
+        include_lowpass_channel: bool = True,
+    ):
+        super().__init__()
+        self.dwt = DWTForward(J=1, wave=wave, mode=mode)
+        self.include_lowpass_channel = include_lowpass_channel
+        
+        # Standard RGB to Grayscale luminosity weights
+        self.register_buffer(
+            "rgb_weights", 
+            torch.tensor([0.2989, 0.5870, 0.1140]).view(1, 3, 1, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 1. Correct Grayscale Conversion
+        if x.shape[1] == 3:
+            gray = (x * self.rgb_weights).sum(dim=1, keepdim=True)
+        else:
+            gray = x.mean(dim=1, keepdim=True)
+
+        # 2. Prevent Automatic Mixed Precision (AMP) type crashes
+        input_dtype = gray.dtype
+        gray_f32 = gray.float()
+
+        yl, yh = self.dwt(gray_f32)
+
+        if not yh:
+            raise RuntimeError("DWTForward returned no high-frequency coefficients")
+
+        # Convert back to the original tensor dtype
+        yl = yl.to(input_dtype)
+        details = yh[0].to(input_dtype).squeeze(1)
+
+        h, w = x.shape[-2:]
+
+        # 3. Use 'nearest' to avoid smearing the isolated frequency bins
+        details = F.interpolate(details, size=(h, w), mode="nearest")
+
+        if self.include_lowpass_channel:
+            ll = F.interpolate(yl, size=(h, w), mode="nearest")
+            coeffs = torch.cat([ll, details], dim=1)
+        else:
+            coeffs = details
+
+        # 4. Global Normalization: Preserves relative energy between LL and High-Freq bands
+        denom = coeffs.abs().amax(dim=(1, 2, 3), keepdim=True).clamp_min(1e-6)
+        return coeffs / denom
 
 
 class DRModel(L.LightningModule):
@@ -50,6 +116,10 @@ class DRModel(L.LightningModule):
         scheduler_monitor_mode: str = "max",
         tta_enabled: bool = False,
         tta_runs: int = 5,
+        use_wavelet_channel_input: bool = False,
+        wavelet_name: str = "haar",
+        wavelet_mode: str = "symmetric",
+        wavelet_include_lowpass_channel: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights"])
@@ -62,9 +132,26 @@ class DRModel(L.LightningModule):
         self.scheduler_monitor_mode = scheduler_monitor_mode
         self.tta_enabled = tta_enabled
         self.tta_runs = tta_runs
+        self.use_wavelet_channel_input = use_wavelet_channel_input
+        self.wavelet_transform = (
+            WaveletChannelTransform(
+                wave=wavelet_name,
+                mode=wavelet_mode,
+                include_lowpass_channel=wavelet_include_lowpass_channel,
+            )
+            if use_wavelet_channel_input
+            else None
+        )
 
         # Define the model
-        self.model = ModelFactory(name=model_name, num_classes=num_classes, freeze_backbone=freeze_backbone)()
+        wavelet_channels = 4 if wavelet_include_lowpass_channel else 3
+        model_input_channels = 3 + wavelet_channels if use_wavelet_channel_input else 3
+        self.model = ModelFactory(
+            name=model_name,
+            num_classes=num_classes,
+            freeze_backbone=freeze_backbone,
+            input_channels=model_input_channels,
+        )()
 
         # Define the loss function
         if loss_name == "focal":
@@ -89,11 +176,14 @@ class DRModel(L.LightningModule):
         self._test_targets = []
 
     def forward(self, x):
+        if self.use_wavelet_channel_input and self.wavelet_transform is not None:
+            wavelet = self.wavelet_transform(x)
+            x = torch.cat([x, wavelet], dim=1)
         return self.model(x)
 
     def training_step(self, batch):
         x, y = batch
-        logits = self.model(x)
+        logits = self(x)
         loss = self.criterion(logits, y)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
@@ -110,7 +200,7 @@ class DRModel(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        logits = self.model(x)
+        logits = self(x)
         loss = self.criterion(logits, y)
         preds = torch.argmax(logits, dim=1)
         metrics = self._compute_metrics(preds, y)
@@ -122,18 +212,27 @@ class DRModel(L.LightningModule):
         x, y = batch
 
         if self.tta_enabled:
-            # Average softmax probabilities over multiple augmented views
+            # Initialize accumulators for both probabilities and loss
             avg_probs = torch.zeros(x.size(0), self.num_classes, device=x.device)
+            avg_loss = 0.0
+            
             for _ in range(self.tta_runs):
                 augmented = self._tta_transform(x)
-                logits = self.model(augmented)
+                logits = self(augmented)
+                
+                # Accumulate probabilities for the final prediction
                 avg_probs += torch.softmax(logits, dim=1)
+                
+                # Accumulate the raw loss using standard logits
+                avg_loss += self.criterion(logits, y)
+                
+            # Average out the accumulators
             avg_probs /= self.tta_runs
+            loss = avg_loss / self.tta_runs
             preds = torch.argmax(avg_probs, dim=1)
-            # Compute loss using the averaged probabilities (log for NLL-style loss)
-            loss = self.criterion(avg_probs.log(), y)
+            
         else:
-            logits = self.model(x)
+            logits = self(x)
             loss = self.criterion(logits, y)
             preds = torch.argmax(logits, dim=1)
 

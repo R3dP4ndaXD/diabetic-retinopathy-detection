@@ -28,17 +28,23 @@ max_epochs: 35
 custom_mean: null
 custom_std: null
 warmup_epochs: 4
+wavelet_name: "haar"
+wavelet_mode: "symmetric"
+wavelet_include_lowpass_channel: true
+
 
 batch_size: 128
 learning_rate: 8e-5
-image_size: 224
-model_name: "resnet50"  # options: efficientnet-b2, swin-v2-b, resnet50
+image_size: 260
+model_name: "efficientnet-b2"  # options: efficientnet-b2, swin-v2-b, resnet50
+
+use_wavelet_channel_input: false
 
 balancing_mode: "naive_oversample"  # options: naive_oversample, sampler, weighted_loss
 normalization_mode: "dataset_by_size"  # options: imagenet, dataset_by_size, custom
 freeze_backbone: false
 
-run_tag: "${model_name}_${balancing_mode}" # used for naming checkpoints and logs
+run_tag: "${model_name}_${balancing_mode}_ben2_torchvision" # used for naming checkpoints and logs
 
 # output: Use project-local paths (will be bind-mounted in container)
 logs_dir: logs

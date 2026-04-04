@@ -13,6 +13,7 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from omegaconf import DictConfig, OmegaConf
 from src.data_module import DRDataModule
 from src.model import DRModel
+from src.models.factory import get_recommended_input_size
 from src.utils import generate_run_id
 
 
@@ -51,10 +52,24 @@ def train(cfg: DictConfig) -> None:
     val_csv_path = _resolve_csv_path(cfg.val_csv_path)
     test_csv_path = _resolve_csv_path(cfg.get("test_csv_path")) if cfg.get("test_csv_path") else None
 
+    if train_csv_path != cfg.train_csv_path:
+        print(f"[path-fallback] train_csv_path not found at '{cfg.train_csv_path}', using '{train_csv_path}'")
+    if val_csv_path != cfg.val_csv_path:
+        print(f"[path-fallback] val_csv_path not found at '{cfg.val_csv_path}', using '{val_csv_path}'")
+    if cfg.get("test_csv_path") and test_csv_path != cfg.test_csv_path:
+        print(f"[path-fallback] test_csv_path not found at '{cfg.test_csv_path}', using '{test_csv_path}'")
+
     print(f"Using train CSV: {train_csv_path}")
     print(f"Using val CSV:   {val_csv_path}")
     if test_csv_path:
         print(f"Using test CSV:  {test_csv_path}")
+
+    recommended_size = get_recommended_input_size(cfg.model_name)
+    if recommended_size is not None and int(cfg.image_size) != int(recommended_size):
+        print(
+            f"[timm-data-mismatch] model '{cfg.model_name}' pretrained config expects image_size={recommended_size}, "
+            f"but cfg.image_size={cfg.image_size}. This can degrade transfer performance."
+        )
 
     # Initialize DataModule
     dm = DRDataModule(
@@ -69,6 +84,7 @@ def train(cfg: DictConfig) -> None:
         custom_mean=cfg.get("custom_mean"),
         custom_std=cfg.get("custom_std"),
     )
+    dm.prepare_data()
     dm.setup()
 
     # Init model from datamodule's attributes
@@ -88,6 +104,10 @@ def train(cfg: DictConfig) -> None:
         scheduler_monitor_mode=cfg.get("scheduler_monitor_mode", "max"),
         tta_enabled=cfg.get("tta_enabled", False),
         tta_runs=cfg.get("tta_runs", 5),
+        use_wavelet_channel_input=cfg.get("use_wavelet_channel_input", False),
+        wavelet_name=cfg.get("wavelet_name", "haar"),
+        wavelet_mode=cfg.get("wavelet_mode", "symmetric"),
+        wavelet_include_lowpass_channel=cfg.get("wavelet_include_lowpass_channel", True),
     )
 
     # Init logger

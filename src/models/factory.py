@@ -1,3 +1,6 @@
+
+import timm
+import torch
 from torch import nn
 from torchvision import models
 
@@ -140,7 +143,13 @@ model_mapping = {
 class Model(nn.Module):
     """Moodel definition."""
 
-    def __init__(self, model_name: str, num_classes: int, freeze_backbone: bool = True):
+    def __init__(
+        self,
+        model_name: str,
+        num_classes: int,
+        freeze_backbone: bool = True,
+        input_channels: int = 3,
+    ):
         """
         Initialize Model instance.
 
@@ -153,6 +162,9 @@ class Model(nn.Module):
 
         model_class, model_config = model_mapping[model_name]
         self.model = model_class(weights=model_config["weights"])
+
+        if input_channels != 3:
+            self._patch_first_conv(input_channels)
 
         # Optionally freeze backbone parameters
         if freeze_backbone:
@@ -196,6 +208,58 @@ class Model(nn.Module):
             nn.Linear(in_features, num_classes),
         )
 
+    def _patch_first_conv(self, input_channels: int) -> None:
+        first_conv_name = None
+        first_conv = None
+
+        for name, module in self.model.named_modules():
+            if isinstance(module, nn.Conv2d):
+                first_conv_name = name
+                first_conv = module
+                break
+
+        if first_conv is None or first_conv_name is None:
+            raise ValueError("Could not find first Conv2d layer to patch input channels")
+
+        new_conv = nn.Conv2d(
+            in_channels=input_channels,
+            out_channels=first_conv.out_channels,
+            kernel_size=first_conv.kernel_size,
+            stride=first_conv.stride,
+            padding=first_conv.padding,
+            dilation=first_conv.dilation,
+            groups=first_conv.groups,
+            bias=first_conv.bias is not None,
+            padding_mode=first_conv.padding_mode,
+        )
+
+        with torch.no_grad():
+            old_weight = first_conv.weight
+            new_conv.weight[:, :3] = old_weight
+            if input_channels > 3:
+                mean_channel = old_weight.mean(dim=1, keepdim=True)
+                repeat_count = input_channels - 3
+                new_conv.weight[:, 3:input_channels] = mean_channel.repeat(1, repeat_count, 1, 1)
+            if first_conv.bias is not None:
+                new_conv.bias.copy_(first_conv.bias)
+
+        self._set_module_by_name(first_conv_name, new_conv)
+
+    def _set_module_by_name(self, module_name: str, new_module: nn.Module) -> None:
+        parent = self.model
+        parts = module_name.split(".")
+        for part in parts[:-1]:
+            if part.isdigit():
+                parent = parent[int(part)]
+            else:
+                parent = getattr(parent, part)
+
+        last = parts[-1]
+        if last.isdigit():
+            parent[int(last)] = new_module
+        else:
+            setattr(parent, last, new_module)
+
 
 class ModelFactory:
     """
@@ -209,7 +273,13 @@ class ModelFactory:
         ValueError: If the specified model factory is not implemented.
     """
 
-    def __init__(self, name: str, num_classes: int, freeze_backbone: bool = True):
+    def __init__(
+        self,
+        name: str,
+        num_classes: int,
+        freeze_backbone: bool = True,
+        input_channels: int = 3,
+    ):
         """
         Initialize ModelFactory instance.
 
@@ -221,6 +291,7 @@ class ModelFactory:
         self.name = name
         self.num_classes = num_classes
         self.freeze_backbone = freeze_backbone
+        self.input_channels = input_channels
 
     def __call__(self):
         """
@@ -239,7 +310,12 @@ class ModelFactory:
                 f"Invalid model name: '{self.name}'. Available options: {valid_options}"
             )
 
-        return Model(self.name, self.num_classes, self.freeze_backbone)
+        return Model(
+            self.name,
+            self.num_classes,
+            self.freeze_backbone,
+            self.input_channels,
+        )
 
 
 if __name__ == "__main__":

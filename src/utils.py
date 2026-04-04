@@ -68,71 +68,58 @@ def preprocess_image(
     clahe_clip_limit=2.0,
     clahe_tile_grid_size=(8, 8),
 ):
-    """Preprocess a retinal fundus image with the following pipeline:
-
-    1. Background crop via binary thresholding + contour bounding box
-    2. Pad to square to preserve aspect ratio
-    3. Resize to target_size
-    4. Ben Graham enhancement (local average color subtraction)
-    5. Luminance contrast enhancement on LAB's L channel (CLAHE or global hist-eq)
-    6. Median blur (3x3) for mild denoising
-
-    Args:
-        image_path (str): Path to the input image file.
-        threshold (int): Binary threshold for background segmentation.
-        target_size (tuple): Target (width, height) for the output image.
-        use_clahe (bool): If True, use CLAHE. Otherwise, use global equalization.
-        clahe_clip_limit (float): CLAHE clip limit.
-        clahe_tile_grid_size (tuple): CLAHE tile grid size.
-
-    Returns:
-        PIL.Image.Image: Preprocessed image ready to be saved.
-    """
     image = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"Could not load image: {image_path}")
 
-    # 1. Background crop
+    # 1. Background crop & Mask extraction
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         raise ValueError(f"No foreground found in image: {image_path}")
+        
     x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
     cropped = image[y : y + h, x : x + w]
+    mask = binary[y : y + h, x : x + w]
 
-    # 2. Pad to a perfect square to MAINTAIN ASPECT RATIO
-    squared = pad_to_square(cropped, pad_value=0)
+    # 2. Pre-fill the background with 128 (Gray) BEFORE resizing to prevent the halo edge artifact
+    cropped[mask == 0] = [128, 128, 128]
 
-    # 3. Resize safely (No distortion since the image is already square)
-    resized = cv2.resize(squared, target_size, interpolation=cv2.INTER_AREA)
+    # 3. Pad to square using 128 (Gray)
+    squared_img = pad_to_square(cropped, pad_value=128)
+    
+    # We must also pad the binary mask to keep track of where the true background is
+    squared_mask = pad_to_square(mask, pad_value=0)
 
-    # 4. Ben Graham Enhancement
-    enhanced = ben_graham_preprocessing(resized)
+    # 4. Resize safely to TARGET_SIZE (e.g., 512x512)
+    resized_img = cv2.resize(squared_img, target_size, interpolation=cv2.INTER_AREA)
+    # Use INTER_NEAREST for the mask to ensure it stays strictly binary (0 or 255) during resize
+    resized_mask = cv2.resize(squared_mask, target_size, interpolation=cv2.INTER_NEAREST)
 
-    # 5. Luminance enhancement on LAB color space
+    # 5. Ben Graham Enhancement (NOW correctly happening at the standardized 512x512 resolution)
+    enhanced = ben_graham_preprocessing(resized_img, sigmaX=10)
+    
+    # 6. Clean up any slight blur bleed by strictly enforcing the gray background again
+    enhanced[resized_mask == 0] = [128, 128, 128]
+
+    # 7. CLAHE on LAB's L channel
     lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     
     if use_clahe:
-        clahe = cv2.createCLAHE(
-            clipLimit=clahe_clip_limit,
-            tileGridSize=clahe_tile_grid_size,
-        )
+        clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size)
         cl = clahe.apply(l)
     else:
-        # Fallback to global equalization if CLAHE is disabled
         cl = cv2.equalizeHist(l)
         
     merged = cv2.merge((cl, a, b))
     lab_enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
-    # 6. Mild Denoising
+    # 8. Mild Denoising
     denoised = cv2.medianBlur(lab_enhanced, 3)
 
-    # Convert BGR → RGB → PIL
-    rgb = cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(rgb)
+    return Image.fromarray(cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB))
 
 def track_files(folder_path, extensions=(".jpg", ".jpeg", ".png")):
     """
@@ -201,36 +188,6 @@ def crop_circle_roi(image_path):
     cropped_roi = image[y : y + h, x : x + w]
 
     return cropped_roi
-
-
-def plot_image_grid(image_paths, roi_crop=False):
-    """
-    Create a grid plot with a maximum of 16 images.
-
-    Args:
-    - image_paths (list): A list of image paths to be plotted.
-
-    Returns:
-    - None
-    """
-    num_images = min(len(image_paths), 16)
-    num_rows = (num_images - 1) // 4 + 1
-    fig, axes = plt.subplots(num_rows, 4, figsize=(12, 3 * num_rows))
-
-    for i, ax in enumerate(axes.flat):
-        if i < num_images:
-            if roi_crop:
-                img = crop_and_pad_image(image_paths[i])
-            else:
-                img = mpimg.imread(image_paths[i])
-            ax.imshow(img)
-            ax.axis("off")
-        else:
-            ax.axis("off")
-
-    plt.tight_layout()
-    plt.show()
-
 
 def generate_run_id(zone: ZoneInfo = ZoneInfo("Europe/Bucharest")) -> str:
     """Generate a unique run ID using current UTC date and time.

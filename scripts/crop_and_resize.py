@@ -64,11 +64,6 @@ parser.add_argument(
     help="Path to write filtered-out image paths (one per line).",
 )
 parser.add_argument(
-    "--use-clahe",
-    action="store_true",
-    help="Use CLAHE on the L channel of the LAB color space.",
-)
-parser.add_argument(
     "--clahe-clip-limit",
     type=float,
     default=2.0,
@@ -115,7 +110,6 @@ def preprocess_and_save(file_info: FileInfo):
             file_info.src,
             threshold=file_info.threshold,
             target_size=file_info.size,
-            use_clahe=file_info.use_clahe,
             clahe_clip_limit=file_info.clahe_clip_limit,
             clahe_tile_grid_size=file_info.clahe_tile_grid,
         )
@@ -135,21 +129,25 @@ if __name__ == "__main__":
         print("Destination folder does not exist. Creating folder...")
         os.makedirs(dst_folder, exist_ok=True)
 
-    files = [
-        FileInfo(
-            src_image_path,
-            os.path.join(dst_folder, os.path.basename(src_image_path)),
-            size,
-            args.threshold,
-            args.filter_blurry,
-            args.laplacian_low,
-            args.laplacian_high,
-            args.use_clahe,
-            args.clahe_clip_limit,
-            tuple(args.clahe_tile_grid),
+    files = []
+    for src_image_path in track_files(src_folder):
+        # FIX: Recreate the exact relative folder structure
+        rel_path = os.path.relpath(src_image_path, src_folder)
+        dest_path = os.path.join(dst_folder, rel_path)
+        
+        files.append(
+            FileInfo(
+                src=src_image_path,
+                dest=dest_path,
+                size=size,
+                threshold=args.threshold,
+                filter_blurry=args.filter_blurry,
+                laplacian_low=args.laplacian_low,
+                laplacian_high=args.laplacian_high,
+                clahe_clip_limit=args.clahe_clip_limit,
+                clahe_tile_grid=tuple(args.clahe_tile_grid),
+            )
         )
-        for src_image_path in track_files(src_folder)
-    ]
 
     if args.skip_existing:
         files = [file_info for file_info in files if not os.path.exists(file_info.dest)]
@@ -158,20 +156,16 @@ if __name__ == "__main__":
     if args.filter_blurry:
         print(f"Laplacian filter enabled: keeping variance in [{args.laplacian_low}, {args.laplacian_high}]")
 
-    concurrent_task_executor(
+    results = concurrent_task_executor(
         preprocess_and_save,
         files,
         max_workers=args.workers,
         description="Processing images",
     )
+    _filtered_out = [res for res in results if res is not None]
 
     if args.filter_blurry and _filtered_out:
         print(f"Filtered out {len(_filtered_out)} images")
-        # Remove destination files for filtered-out source images[cite: 3]
-        for src_path in _filtered_out:
-            dest_path = os.path.join(dst_folder, os.path.basename(src_path))
-            if os.path.exists(dest_path):
-                os.remove(dest_path)
         if args.filtered_log:
             with open(args.filtered_log, "w") as f:
                 f.write("\n".join(_filtered_out) + "\n")
