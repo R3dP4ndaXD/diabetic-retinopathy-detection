@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
+# Submit a single-model training job.
+# Usage:
+#   NUM_GPUS=2 APPTAINER_IMAGE=... DATASET_DIR=... ./scripts/submit_slurm_apptainer.sh \
+#       model_name=convnext_base image_size=224 batch_size=64
 
 set -euo pipefail
 
 if [[ -z "${APPTAINER_IMAGE:-}" ]]; then
-    echo "APPTAINER_IMAGE must point to your cluster image, for example /path/to/pytorch.sif." >&2
+    echo "APPTAINER_IMAGE must point to your cluster image, e.g. /path/to/dr-detection.sif." >&2
     exit 1
 fi
 
@@ -13,9 +17,10 @@ SLURM_OUT_DIR="${SLURM_OUT_DIR:-${PROJECT_DIR}/slurm}"
 
 JOB_NAME="${JOB_NAME:-dr-train}"
 PARTITION="${PARTITION:-dgxh100}"
-GRES="${GRES:-gpu:1}"
-CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
-MEMORY="${MEMORY:-32G}"
+NUM_GPUS="${NUM_GPUS:-1}"
+GRES="${GRES:-gpu:${NUM_GPUS}}"
+CPUS_PER_TASK="${CPUS_PER_TASK:-$((8 * NUM_GPUS))}"
+MEMORY="${MEMORY:-$((32 * NUM_GPUS))G}"
 TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
 ACCOUNT="${ACCOUNT:-}"
 QOS="${QOS:-}"
@@ -46,12 +51,16 @@ if [[ -n "${QOS}" ]]; then
 fi
 
 SBATCH_CMD+=(
-    --export="ALL,APPTAINER_IMAGE=${APPTAINER_IMAGE},PROJECT_DIR=${PROJECT_DIR},CONTAINER_WORKDIR=${CONTAINER_WORKDIR},APPTAINER_EXTRA_BINDS=${APPTAINER_EXTRA_BINDS},DATASET_DIR=${DATASET_DIR}"
+    --export="ALL,APPTAINER_IMAGE=${APPTAINER_IMAGE},PROJECT_DIR=${PROJECT_DIR},CONTAINER_WORKDIR=${CONTAINER_WORKDIR},APPTAINER_EXTRA_BINDS=${APPTAINER_EXTRA_BINDS},DATASET_DIR=${DATASET_DIR},NUM_GPUS=${NUM_GPUS}"
     "${JOB_SCRIPT}"
 )
 
-echo "Submitting Slurm job with image ${APPTAINER_IMAGE}"
-echo "Project dir: ${PROJECT_DIR}"
-echo "Slurm logs: ${SLURM_OUT_DIR}"
+echo "Submitting DR training job"
+echo "  Image     : ${APPTAINER_IMAGE}"
+echo "  GPUs      : ${NUM_GPUS} (${GRES})"
+echo "  CPUs/task : ${CPUS_PER_TASK}"
+echo "  Memory    : ${MEMORY}"
+echo "  Partition : ${PARTITION}"
+echo "  Slurm logs: ${SLURM_OUT_DIR}"
 
 "${SBATCH_CMD[@]}" "$@"

@@ -1,322 +1,188 @@
+from __future__ import annotations
 
 import timm
 import torch
+from timm.data import resolve_data_config
 from torch import nn
-from torchvision import models
 
-MODEL_RECOMMENDED_INPUT_SIZES = {
-    "densenet121": 224,
-    "densenet161": 224,
-    "densenet169": 224,
-    "densenet201": 224,
-    "resnet50": 224,
-    "resnet101": 224,
-    "resnet152": 224,
-    "vit-b-16": 224,
-    "vit-b-32": 224,
-    "swin-t": 224,
-    "swin-s": 224,
-    "swin-b": 224,
-    "swin-v2-b": 256,
-    "efficientnet-b0": 224,
-    "efficientnet-b1": 240,
-    "efficientnet-b2": 260,
-    "efficientnet-b3": 300,
-    "efficientnet-b4": 380,
-    "efficientnet-b5": 456,
-    "efficientnet-b6": 528,
-    "efficientnet-b7": 600,
-    "efficientnet-v2-s": 384,
-    "efficientnet-v2-m": 480,
-    "efficientnet-v2-l": 480,
+# ---------------------------------------------------------------------------
+# Registry: short name  →  (timm model id, recommended input size)
+# ---------------------------------------------------------------------------
+TIMM_MODEL_REGISTRY: dict[str, tuple[str, int]] = {
+    # ── Heavy backbones (RGB stream / single-stream training) ────────────────
+    "efficientnetv2_m":  ("efficientnetv2_rw_m.agc_in1k",                       416),
+    "efficientnetv2_s":  ("efficientnetv2_rw_s.ra2_in1k",                        384),
+    "convnext_base":     ("convnext_base.fb_in22k_ft_in1k",                       224),
+    "convnext_large":    ("convnext_large.fb_in22k_ft_in1k",                      224),
+    "coatnet_2":         ("coatnet_2_rw_224.sw_in12k_ft_in1k",                    224),
+    "maxvit_base":       ("maxvit_base_tf_512.in21k_ft_in1k",                     512),
+    "swin_base":         ("swinv2_base_window12to16_192to256.ms_in22k_ft_in1k",   256),
+    "vit_base":          ("vit_base_patch16_224.augreg2_in21k_ft_in1k",           224),
+    # ── Lightweight backbones (wavelet stream / fast ablations) ─────────────
+    "efficientnet_b0":   ("efficientnet_b0.ra_in1k",                              224),
+    "efficientnet_b2":   ("efficientnet_b2.ra_in1k",                              260),
+    "mobilenetv3_large": ("mobilenetv3_large_100.ra_in1k",                        224),
 }
 
 
 def get_recommended_input_size(model_name: str) -> int | None:
-    return MODEL_RECOMMENDED_INPUT_SIZES.get(model_name)
+    entry = TIMM_MODEL_REGISTRY.get(model_name)
+    return entry[1] if entry else None
 
 
-def get_supported_model_input_sizes() -> dict:
-    return dict(MODEL_RECOMMENDED_INPUT_SIZES)
-
-model_mapping = {
-    "densenet121": (    
-        models.densenet121,
-        {"weights": models.DenseNet121_Weights.DEFAULT, "family": "densenet"},
-    ),
-    "densenet161": (
-        models.densenet161,
-        {"weights": models.DenseNet161_Weights.DEFAULT, "family": "densenet"},
-    ),
-    "densenet169": (
-        models.densenet169,
-        {"weights": models.DenseNet169_Weights.DEFAULT, "family": "densenet"},
-    ),
-    "densenet201": (
-        models.densenet201,
-        {"weights": models.DenseNet201_Weights.DEFAULT, "family": "densenet"},
-    ),
-    "resnet50": (
-        models.resnet50,
-        {"weights": models.ResNet50_Weights.IMAGENET1K_V2, "family": "resnet"},
-    ),
-    "resnet101": (
-        models.resnet101,
-        {"weights": models.ResNet101_Weights.IMAGENET1K_V2, "family": "resnet"},
-    ),
-    "resnet152": (
-        models.resnet152,
-        {"weights": models.ResNet152_Weights.IMAGENET1K_V2, "family": "resnet"},
-    ),
-    "vit-b-16": (
-        models.vit_b_16,
-        {"weights": models.ViT_B_16_Weights.DEFAULT, "family": "vit"},
-    ),
-    "vit-b-32": (
-        models.vit_b_32,
-        {"weights": models.ViT_B_32_Weights.DEFAULT, "family": "vit"},
-    ),
-    "swin-t": (
-        models.swin_t,
-        {"weights": models.Swin_T_Weights.DEFAULT, "family": "swin"},
-    ),
-    "swin-s": (
-        models.swin_s,
-        {"weights": models.Swin_S_Weights.DEFAULT, "family": "swin"},
-    ),
-    "swin-b": (
-        models.swin_b,
-        {"weights": models.Swin_B_Weights.DEFAULT, "family": "swin"},
-    ),
-    "swin-v2-b": (
-        models.swin_v2_b,
-        {"weights": models.Swin_V2_B_Weights.DEFAULT, "family": "swin"},
-    ),
-    "efficientnet-b0": (    # 224x224 input size
-        models.efficientnet_b0,
-        {"weights": models.EfficientNet_B0_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-b1": (    # 240x240 input size
-        models.efficientnet_b1,
-        {"weights": models.EfficientNet_B1_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-b2": (    # 260x260 input size
-        models.efficientnet_b2,
-        {"weights": models.EfficientNet_B2_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-b3": (    # 300x300 input size
-        models.efficientnet_b3,
-        {"weights": models.EfficientNet_B3_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-b4": (    # 380x380 input size
-        models.efficientnet_b4,
-        {"weights": models.EfficientNet_B4_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-b5": (    # 456x456 input size
-        models.efficientnet_b5,
-        {"weights": models.EfficientNet_B5_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-b6": (    # 528x528 input size
-        models.efficientnet_b6,
-        {"weights": models.EfficientNet_B6_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-b7": (    # 600x600 input size
-        models.efficientnet_b7,
-        {"weights": models.EfficientNet_B7_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-v2-s": (  # 384x384 input size
-        models.efficientnet_v2_s,
-        {"weights": models.EfficientNet_V2_S_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-v2-m": (  # 480x480 input size
-        models.efficientnet_v2_m,
-        {"weights": models.EfficientNet_V2_M_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    "efficientnet-v2-l": (  # 480x480 input size
-        models.efficientnet_v2_l,
-        {"weights": models.EfficientNet_V2_L_Weights.DEFAULT, "family": "efficientnet"},
-    ),
-    # Add more models as needed with their respective configurations.
-}
+def list_supported_models() -> list[str]:
+    return sorted(TIMM_MODEL_REGISTRY.keys())
 
 
-class Model(nn.Module):
-    """Moodel definition."""
+# ---------------------------------------------------------------------------
+# Core model wrapper
+# ---------------------------------------------------------------------------
+
+class TimmModel(nn.Module):
+    """
+    Thin wrapper around a timm backbone.
+
+    Parameters
+    ----------
+    model_name       : short name from TIMM_MODEL_REGISTRY
+    num_classes      : output classes (0 = feature-only mode, no head)
+    drop_rate        : dropout before final classifier
+    drop_path_rate   : stochastic depth rate (ViTs / ConvNeXt benefit most)
+    input_channels   : 3 for RGB; >3 for wavelet-augmented input
+    freeze_backbone  : if True freeze all params except the classifier head
+    """
 
     def __init__(
         self,
         model_name: str,
         num_classes: int,
-        freeze_backbone: bool = True,
+        drop_rate: float = 0.3,
+        drop_path_rate: float = 0.2,
         input_channels: int = 3,
-    ):
-        """
-        Initialize Model instance.
+        freeze_backbone: bool = False,
+    ) -> None:
+        super().__init__()
 
-        Args:
-            model_name (str): Name of the model architecture.
-            num_classes (int): Number of output classes.
-            freeze_backbone (bool): If True, freeze pretrained weights. If False, train the whole model.
-        """
-        super(Model, self).__init__()
+        if model_name not in TIMM_MODEL_REGISTRY:
+            valid = ", ".join(sorted(TIMM_MODEL_REGISTRY))
+            raise ValueError(
+                f"Unknown model_name '{model_name}'. Valid options: {valid}"
+            )
 
-        model_class, model_config = model_mapping[model_name]
-        self.model = model_class(weights=model_config["weights"])
+        timm_id, _ = TIMM_MODEL_REGISTRY[model_name]
 
-        if input_channels != 3:
-            self._patch_first_conv(input_channels)
+        # timm handles in_chans adaptation (weight inflation) internally
+        self.backbone = timm.create_model(
+            timm_id,
+            pretrained=True,
+            num_classes=num_classes,
+            drop_rate=drop_rate,
+            drop_path_rate=drop_path_rate,
+            in_chans=input_channels,
+        )
 
-        # Optionally freeze backbone parameters
+        # Expose the data config so callers can read mean/std/input_size
+        self.data_config: dict = resolve_data_config({}, model=self.backbone)
+
         if freeze_backbone:
-            for param in self.model.parameters():
-                param.requires_grad = False
+            self._freeze_backbone()
 
-        in_features = self._get_in_features(model_config["family"])
+    # ------------------------------------------------------------------
+    # Forward helpers
+    # ------------------------------------------------------------------
 
-        if model_config["family"] == "densenet":
-            self.model.classifier = self._create_classifier(in_features, num_classes)
-        elif model_config["family"] == "resnet":
-            self.model.fc = self._create_classifier(in_features, num_classes)
-        elif model_config["family"] == "vit":
-            self.model.heads = self._create_classifier(in_features, num_classes)
-        elif model_config["family"] == "swin":
-            self.model.head = self._create_classifier(in_features, num_classes)
-        elif model_config["family"] == "efficientnet":
-            self.model.classifier = self._create_classifier(in_features, num_classes)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone(x)
 
-    def forward(self, x):
-        """Forward pass through the model."""
-        return self.model(x)
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Return spatial feature map (before pooling)."""
+        return self.backbone.forward_features(x)
 
-    def _get_in_features(self, family: str) -> int:
-        """Return the number of input features for the classifier."""
-        if family == "densenet":
-            return self.model.classifier.in_features
-        elif family == "resnet":
-            return self.model.fc.in_features
-        elif family == "vit":
-            return self.model.heads.head.in_features
-        elif family == "swin":
-            return self.model.head.in_features
-        elif family == "efficientnet":
-            return self.model.classifier[1].in_features
+    def forward_head(self, features: torch.Tensor, pre_logits: bool = False) -> torch.Tensor:
+        """
+        Run the pooling + classifier head on pre-computed features.
 
-    def _create_classifier(self, in_features: int, num_classes: int) -> nn.Sequential:
-        """Create the classifier module."""
-        return nn.Sequential(
-            nn.Dropout(0.3),
-            nn.Linear(in_features, num_classes),
-        )
+        Parameters
+        ----------
+        pre_logits : if True return the pooled vector *before* the linear
+                     classifier — useful as a feature embedding for fusion.
+        """
+        return self.backbone.forward_head(features, pre_logits=pre_logits)
 
-    def _patch_first_conv(self, input_channels: int) -> None:
-        first_conv_name = None
-        first_conv = None
+    def get_feature_dim(self) -> int:
+        """Dimensionality of the pooled embedding (before classifier)."""
+        return self.backbone.num_features
 
-        for name, module in self.model.named_modules():
-            if isinstance(module, nn.Conv2d):
-                first_conv_name = name
-                first_conv = module
-                break
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
 
-        if first_conv is None or first_conv_name is None:
-            raise ValueError("Could not find first Conv2d layer to patch input channels")
+    def _freeze_backbone(self) -> None:
+        """Freeze everything except the classification head."""
+        head_names = {"head", "classifier", "fc", "heads"}
+        for name, param in self.backbone.named_parameters():
+            top_module = name.split(".")[0]
+            param.requires_grad = top_module in head_names
 
-        new_conv = nn.Conv2d(
-            in_channels=input_channels,
-            out_channels=first_conv.out_channels,
-            kernel_size=first_conv.kernel_size,
-            stride=first_conv.stride,
-            padding=first_conv.padding,
-            dilation=first_conv.dilation,
-            groups=first_conv.groups,
-            bias=first_conv.bias is not None,
-            padding_mode=first_conv.padding_mode,
-        )
+    def unfreeze(self) -> None:
+        for param in self.backbone.parameters():
+            param.requires_grad = True
 
-        with torch.no_grad():
-            old_weight = first_conv.weight
-            new_conv.weight[:, :3] = old_weight
-            if input_channels > 3:
-                mean_channel = old_weight.mean(dim=1, keepdim=True)
-                repeat_count = input_channels - 3
-                new_conv.weight[:, 3:input_channels] = mean_channel.repeat(1, repeat_count, 1, 1)
-            if first_conv.bias is not None:
-                new_conv.bias.copy_(first_conv.bias)
 
-        self._set_module_by_name(first_conv_name, new_conv)
-
-    def _set_module_by_name(self, module_name: str, new_module: nn.Module) -> None:
-        parent = self.model
-        parts = module_name.split(".")
-        for part in parts[:-1]:
-            if part.isdigit():
-                parent = parent[int(part)]
-            else:
-                parent = getattr(parent, part)
-
-        last = parts[-1]
-        if last.isdigit():
-            parent[int(last)] = new_module
-        else:
-            setattr(parent, last, new_module)
-
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
 
 class ModelFactory:
     """
-    Factory for creating different models based on their names.
+    Convenience factory — mirrors the old API so callers don't change.
 
-    Args:
-        name (str): The name of the model factory.
-        num_classes (int): The number of output classes.
-
-    Raises:
-        ValueError: If the specified model factory is not implemented.
+    Usage
+    -----
+        factory = ModelFactory(
+            name="convnext_base",
+            num_classes=5,
+            drop_path_rate=0.2,
+        )
+        model = factory()           # returns TimmModel instance
+        data_cfg = model.data_config
     """
 
     def __init__(
         self,
         name: str,
         num_classes: int,
-        freeze_backbone: bool = True,
+        freeze_backbone: bool = False,
         input_channels: int = 3,
-    ):
-        """
-        Initialize ModelFactory instance.
-
-        Args:
-            name (str): The name of the model.
-            num_classes (int): The number of output classes.
-            freeze_backbone (bool): Whether to freeze backbone weights.
-        """
+        drop_rate: float = 0.3,
+        drop_path_rate: float = 0.2,
+    ) -> None:
         self.name = name
         self.num_classes = num_classes
         self.freeze_backbone = freeze_backbone
         self.input_channels = input_channels
+        self.drop_rate = drop_rate
+        self.drop_path_rate = drop_path_rate
 
-    def __call__(self):
-        """
-        Create a model instance based on the provided name.
-
-        Args:
-            model_name (str): Name of the model architecture.
-            num_classes (int): Number of output classes.
-
-        Returns:
-            Model: An instance of the selected model.
-        """
-        if self.name not in model_mapping:
-            valid_options = ", ".join(model_mapping.keys())
-            raise ValueError(
-                f"Invalid model name: '{self.name}'. Available options: {valid_options}"
-            )
-
-        return Model(
-            self.name,
-            self.num_classes,
-            self.freeze_backbone,
-            self.input_channels,
+    def __call__(self) -> TimmModel:
+        return TimmModel(
+            model_name=self.name,
+            num_classes=self.num_classes,
+            drop_rate=self.drop_rate,
+            drop_path_rate=self.drop_path_rate,
+            input_channels=self.input_channels,
+            freeze_backbone=self.freeze_backbone,
         )
 
 
+# ---------------------------------------------------------------------------
+# Quick test
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    model = ModelFactory("resnet50", 5)()
+    for name in ["convnext_base", "efficientnet_b0", "vit_base"]:
+        m = ModelFactory(name, num_classes=5)()
+        x = torch.randn(2, 3, 224, 224)
+        with torch.no_grad():
+            out = m(x)
+        print(f"{name}: output={out.shape}  features={m.get_feature_dim()}  "
+              f"mean={m.data_config['mean']}")

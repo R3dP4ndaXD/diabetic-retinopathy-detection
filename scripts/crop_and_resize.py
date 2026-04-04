@@ -77,6 +77,12 @@ parser.add_argument(
     default=(8, 8),
     help="CLAHE tile grid size.",
 )
+parser.add_argument(
+    "--sigmaX",
+    type=float,
+    default=10.0,
+    help="Gaussian blur sigma for Ben Graham enhancement (default: 10).",
+)
 
 
 class FileInfo(NamedTuple):
@@ -90,6 +96,7 @@ class FileInfo(NamedTuple):
     use_clahe: bool
     clahe_clip_limit: float
     clahe_tile_grid: Tuple[int, int]
+    sigmaX: float = 10.0
 
 
 # Shared list for filtered-out paths (written at the end, not per-worker)[cite: 3]
@@ -112,6 +119,7 @@ def preprocess_and_save(file_info: FileInfo):
             target_size=file_info.size,
             clahe_clip_limit=file_info.clahe_clip_limit,
             clahe_tile_grid_size=file_info.clahe_tile_grid,
+            sigmaX=file_info.sigmaX,
         )
         result.save(file_info.dest)
     except Exception as e:
@@ -146,6 +154,7 @@ if __name__ == "__main__":
                 laplacian_high=args.laplacian_high,
                 clahe_clip_limit=args.clahe_clip_limit,
                 clahe_tile_grid=tuple(args.clahe_tile_grid),
+                sigmaX=args.sigmaX,
             )
         )
 

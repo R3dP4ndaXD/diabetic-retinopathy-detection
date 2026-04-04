@@ -67,6 +67,7 @@ def preprocess_image(
     use_clahe=True,
     clahe_clip_limit=2.0,
     clahe_tile_grid_size=(8, 8),
+    sigmaX=10,
 ):
     image = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
@@ -98,7 +99,7 @@ def preprocess_image(
     resized_mask = cv2.resize(squared_mask, target_size, interpolation=cv2.INTER_NEAREST)
 
     # 5. Ben Graham Enhancement (NOW correctly happening at the standardized 512x512 resolution)
-    enhanced = ben_graham_preprocessing(resized_img, sigmaX=10)
+    enhanced = ben_graham_preprocessing(resized_img, sigmaX=sigmaX)
     
     # 6. Clean up any slight blur bleed by strictly enforcing the gray background again
     enhanced[resized_mask == 0] = [128, 128, 128]
