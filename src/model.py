@@ -536,9 +536,10 @@ class DRModel(L.LightningModule):
                 reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
                     optimizer,
                     mode=self.scheduler_monitor_mode,
-                    factor=0.3,
-                    patience=2,
-                    threshold=0.001,
+                    factor=0.5,   
+                    patience=5,   
+                    threshold=1e-3,
+                    min_lr=1e-7,
                 )
                 configuration["lr_scheduler"] = {
                     "scheduler": reduce_lr,

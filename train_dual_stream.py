@@ -41,6 +41,7 @@ def train(cfg: DictConfig) -> None:
     if run_tag:
         run_id = f"{run_id}-{run_tag}"
 
+    print(f"Run ID    : {run_id}")
     L.seed_everything(cfg.seed, workers=True)
     torch.set_float32_matmul_precision("high")
 

@@ -10,7 +10,7 @@ seed: 42
 num_workers: 8
 logs_dir: logs
 checkpoint_dirpath: artifacts/checkpoints
-run_tag: "${model_name}_${balancing_mode}_wav${wavelet_levels}"
+run_tag: "${model_name}_${balancing_mode}_wavelet_harr_1level_LL"
 
 # ── Model ────────────────────────────────────────────────────────────────────
 model_name: "efficientnet_b2"   # See src/models/factory.py TIMM_MODEL_REGISTRY
@@ -67,10 +67,10 @@ tta_enabled: false
 tta_runs: 5
 
 # ── Wavelet channel input (single-stream only) ────────────────────────────────
-use_wavelet_channel_input: false
+use_wavelet_channel_input: true
 wavelet_name: "haar"    # "symlet", "haar"
 wavelet_mode: "symmetric"
-wavelet_levels: 2
+wavelet_levels: 1
 wavelet_include_lowpass_channel: true
 
 # ── Multi-GPU (DDP) ──────────────────────────────────────────────────────────

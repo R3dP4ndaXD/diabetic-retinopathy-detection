@@ -13,11 +13,11 @@ seed: 42
 num_workers: 8
 logs_dir: logs
 checkpoint_dirpath: artifacts/checkpoints
-run_tag: "${rgb_model_name}_${wav_model_name}_${fusion_type}_dual"
+run_tag: "${rgb_model_name}_${wav_model_name}_${fusion_type}_dual_no_randaug"
 
 # ── Dual-stream backbone names ────────────────────────────────────────────────
-rgb_model_name: "vit_base"     # heavy backbone for RGB stream
-wav_model_name: "efficientnet_b0"   # lightweight backbone for wavelet stream
+rgb_model_name: "coatnet_2"     # heavy backbone for RGB stream
+wav_model_name: "convnext_base"   # lightweight backbone for wavelet stream
 
 # ── Fusion ────────────────────────────────────────────────────────────────────
 fusion_type: "mlp"           # "mlp" | "cross_attention"
@@ -29,7 +29,7 @@ fusion_num_heads: 8          # only used when fusion_type="cross_attention"
 wavelet_name: "sym2"         # symlet-2; outperforms haar on DR per literature
 wavelet_mode: "symmetric"
 wavelet_levels: 2            # J=2 decomposition (LL + LH/HL/HH at 2 scales)
-wavelet_include_lowpass_channel: true
+wavelet_include_lowpass_channel: true   # include LL channel as input to wavelet stream
 
 # ── Image & normalisation ────────────────────────────────────────────────────
 image_size: 224

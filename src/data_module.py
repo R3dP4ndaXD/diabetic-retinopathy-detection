@@ -122,7 +122,7 @@ class DRDataModule(L.LightningDataModule):
                 shear=(-11, 11),
                 fill=(128, 128, 128),
             ),
-            T.RandAugment(num_ops=2, magnitude=9, fill=(128, 128, 128)),
+            #T.RandAugment(num_ops=2, magnitude=9, fill=(128, 128, 128)),
             T.ToImage(),
             T.ToDtype(torch.float32, scale=True),
             T.RandomErasing(p=0.25, scale=(0.02, 0.1), value=0.5),

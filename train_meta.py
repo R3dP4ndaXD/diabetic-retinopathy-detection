@@ -180,6 +180,7 @@ def main() -> None:
         )
 
     run_id = generate_run_id()
+    print(f"Run ID    : {run_id}")
     output_dir = Path(args.output_dir) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
