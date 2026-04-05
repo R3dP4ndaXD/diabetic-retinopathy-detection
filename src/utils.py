@@ -64,7 +64,6 @@ def preprocess_image(
     image_path,
     threshold=10,
     target_size=(512, 512),
-    use_clahe=True,
     clahe_clip_limit=2.0,
     clahe_tile_grid_size=(8, 8),
     sigmaX=10,
@@ -107,12 +106,10 @@ def preprocess_image(
     # 7. CLAHE on LAB's L channel
     lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    
-    if use_clahe:
-        clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size)
-        cl = clahe.apply(l)
-    else:
-        cl = cv2.equalizeHist(l)
+
+    clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=clahe_tile_grid_size)
+    cl = clahe.apply(l)
+
         
     merged = cv2.merge((cl, a, b))
     lab_enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
@@ -153,42 +150,6 @@ def track_files(folder_path, extensions=(".jpg", ".jpeg", ".png")):
                 file_list.append(file_path)
 
     return file_list
-
-
-def crop_circle_roi(image_path):
-    """
-    Crop the circular Region of Interest (ROI) from a fundus image.
-
-    Args:
-    - image_path (str): Path to the fundus image.
-
-    Returns:
-    - cropped_roi (numpy.ndarray): The cropped circular Region of Interest.
-    """
-    # Read the image
-    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-
-    # Convert the image to grayscale
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # Apply thresholding to binarize the image
-    _, thresholded_image = cv2.threshold(gray_image, 50, 255, cv2.THRESH_BINARY)
-
-    # Find contours in the binary image
-    contours, _ = cv2.findContours(
-        thresholded_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    # Assuming the largest contour corresponds to the ROI
-    contour = max(contours, key=cv2.contourArea)
-
-    # Get the bounding rectangle of the contour
-    x, y, w, h = cv2.boundingRect(contour)
-
-    # Crop the circular ROI using the bounding rectangle
-    cropped_roi = image[y : y + h, x : x + w]
-
-    return cropped_roi
 
 def generate_run_id(zone: ZoneInfo = ZoneInfo("Europe/Bucharest")) -> str:
     """Generate a unique run ID using current UTC date and time.

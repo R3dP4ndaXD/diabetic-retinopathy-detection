@@ -25,7 +25,6 @@ class DRDataModule(L.LightningDataModule):
         "imagenet"       – standard ImageNet stats
         "dataset_by_size"– pre-computed dataset stats keyed by image_size
                            (supported sizes: 224, 260)
-        "custom"         – user-provided custom_mean / custom_std
 
     balancing_mode
         "naive_oversample" – duplicate minority rows in a sidecar CSV
@@ -48,8 +47,6 @@ class DRDataModule(L.LightningDataModule):
         balancing_mode: str = "weighted_loss",
         normalization_mode: str = "timm",
         timm_data_config: dict | None = None,
-        custom_mean: list | None = None,
-        custom_std: list | None = None,
         # MixUp / CutMix
         use_mixup: bool = True,
         mixup_alpha: float = 0.4,
@@ -103,26 +100,15 @@ class DRDataModule(L.LightningDataModule):
                 raise ValueError(
                     f"No dataset stats for image_size={image_size}. "
                     f"Available: {available}. "
-                    "Use normalization_mode='imagenet' or 'custom'."
+                    "Use normalization_mode='imagenet'."
                 )
             self.dataset_mean = dataset_stats_by_size[image_size]["mean"]
             self.dataset_std  = dataset_stats_by_size[image_size]["std"]
 
-        elif normalization_mode == "custom":
-            if not custom_mean or not custom_std:
-                raise ValueError(
-                    "custom_mean and custom_std must be provided when "
-                    "normalization_mode='custom'."
-                )
-            if len(custom_mean) != 3 or len(custom_std) != 3:
-                raise ValueError("custom_mean and custom_std must each have 3 values.")
-            self.dataset_mean = list(custom_mean)
-            self.dataset_std  = list(custom_std)
-
         else:
             raise ValueError(
                 f"Invalid normalization_mode '{normalization_mode}'. "
-                "Expected one of: timm, imagenet, dataset_by_size, custom."
+                "Expected one of: timm, imagenet, dataset_by_size."
             )
 
         # ── Transforms ───────────────────────────────────────────────────────
@@ -136,7 +122,7 @@ class DRDataModule(L.LightningDataModule):
                 shear=(-11, 11),
                 fill=(128, 128, 128),
             ),
-            T.RandAugment(num_ops=2, magnitude=9),
+            T.RandAugment(num_ops=2, magnitude=9, fill=(128, 128, 128)),
             T.ToImage(),
             T.ToDtype(torch.float32, scale=True),
             T.RandomErasing(p=0.25, scale=(0.02, 0.1), value=0.5),
@@ -255,6 +241,7 @@ class DRDataModule(L.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=(self.sampler is None),
             sampler=self.sampler,
+            drop_last=self.mixup_fn is not None,
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=self.num_workers > 0,

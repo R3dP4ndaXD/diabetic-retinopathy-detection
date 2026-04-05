@@ -93,7 +93,6 @@ class FileInfo(NamedTuple):
     filter_blurry: bool
     laplacian_low: float
     laplacian_high: float
-    use_clahe: bool
     clahe_clip_limit: float
     clahe_tile_grid: Tuple[int, int]
     sigmaX: float = 10.0

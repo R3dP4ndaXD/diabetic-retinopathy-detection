@@ -87,6 +87,15 @@ def main() -> None:
     if not test_csv_path.is_file():
         raise FileNotFoundError(f"Test CSV not found: {test_csv_path}")
 
+    model = DRModel.load_from_checkpoint(str(checkpoint_path))
+
+    # Rebuild normalization to match training: read timm data_config from
+    # the same backbone that was used during training.
+    from src.models.factory import ModelFactory
+    _tmp = ModelFactory(name=model.hparams.model_name, num_classes=model.num_classes)()
+    timm_data_config = _tmp.data_config
+    del _tmp
+
     dm = DRDataModule(
         train_csv_path=str(test_csv_path),  # required by constructor but unused for eval-only usage
         val_csv_path=str(test_csv_path),
@@ -94,10 +103,10 @@ def main() -> None:
         image_size=args.image_size,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        normalization_mode="timm",
+        timm_data_config=timm_data_config,
     )
     dm.setup()
-
-    model = DRModel.load_from_checkpoint(str(checkpoint_path))
 
     # Enable TTA if requested
     if args.tta:

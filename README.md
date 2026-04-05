@@ -240,3 +240,11 @@ The original Kaggle test set is unlabeled and is not used.
 ./scripts/submit_slurm_test_ensemble_apptainer.sh   --ensemble-checkpoints artifacts/checkpoints/run-2026-03-30-20-26-43-swin_b_naive_oversample/epoch\=10-step\=8877-val_loss\=1.09-val_acc\=0.75-val_kappa\=0.61.ckpt artifacts/checkpoints/run-2026-03-30-18-24-09-resnet50_naive_oversample/epoch\=11-step\=9684-val_loss\=1.32-val_acc\=0.74-val_kappa\=0.55.ckpt artifacts/checkpoints/run-2026-03-30-20-23-09-densenet121_naive_oversample/epoch\=14-step\=12105-val_loss\=1.22-val_acc\=0.75-val_kappa\=0.56.ckpt artifacts/checkpoints/run-2026-03-30-21-21-28-efficientnet_b0_naive_oversample/epoch\=9-step\=8070-val_loss\=1.05-val_acc\=0.67-val_kappa\=0.56.ckpt  artifacts/checkpoints/run-2026-03-30-15-56-31-efficientnet_b2_naive_oversample/epoch\=13-step\=11298-val_loss\=1.28-val_acc\=0.76-val_kappa\=0.62.ckpt   --tune-ensemble-weights   --test-csv data/diabetic-retinopathy-dataset_ben_2
 24/test.csv  --val-csv data/diabetic-retinopathy-dataset_ben_224/val.csv
 
+
+Test QWK (meta-learner, mlp):               0.7596
+Test QWK (meta-learner, learned_weights):   0.7684
+Test QWK (meta-learner, cross_attention):   0.7792
+Test QWK (uniform ensemble baseline):       0.7682
+
+./scripts/submit_slurm_train_meta.sh \
+  --base-checkpoints artifacts/checkpoints/run-2026-04-05-04-24-52-efficientnetv2_m_naive_oversample/epoch\=23-step\=38688-val_loss\=0.83-val_acc\=0.82-val_kappa\=0.72.ckpt artifacts/checkpoints/run-2026-04-05-02-51-31-coatnet_2_naive_oversample/epoch\=5-step\=4836-val_loss\=0.87-val_acc\=0.78-val_kappa\=0.71.ckpt artifacts/checkpoints/run-2026-04-04-19-53-42-swin_base_naive_oversample_no_ema/epoch\=33-step\=54808-val_loss\=0.86-val_acc\=0.83-val_kappa\=0.73.ckpt artifacts/checkpoints/run-2026-04-04-17-26-17-convnext_base_efficientnet_b0_mlp_dual/epoch\=23-step\=77400-val_loss\=0.87-val_acc\=0.82-val_kappa\=0.71.ckpt artifacts/checkpoints/run-2026-04-04-16-19-21-efficientnet_b2_naive_oversample_no_ema/epoch\=30-step\=24986-val_loss\=0.88-val_acc\=0.78-val_kappa\=0.69.ckpt artifacts/checkpoints/run-2026-04-04-14-33-54-convnext_base_naive_oversample/epoch\=23-step\=38688-val_loss\=0.88-val_acc\=0.81-val_kappa\=0.72.ckpt --image-sizes 416 224 256 224 260 224 --test-csv data/diabetic-retinopathy-dataset/test.csv  --val-csv data/diabetic-retinopathy-dataset/val.csv --fusion-type mlp

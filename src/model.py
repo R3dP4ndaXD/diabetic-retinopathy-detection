@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import copy
+import io
 import random
 
 import lightning as L
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from pytorch_wavelets import DWTForward
-from sklearn.metrics import classification_report, cohen_kappa_score
+from sklearn.metrics import (
+    classification_report,
+    cohen_kappa_score,
+    confusion_matrix,
+    precision_recall_fscore_support,
+)
 from timm.data import Mixup
 from timm.utils import ModelEmaV2
 from torch import nn
@@ -154,13 +163,141 @@ class EMACallback(L.Callback):
         if self._ema is None:
             return
         self._backup = copy.deepcopy(pl_module.state_dict())
-        self._ema.copy_to(pl_module)
+        # timm>=1.0 removed copy_to; keep compatibility with older/newer timm.
+        if hasattr(self._ema, "copy_to"):
+            self._ema.copy_to(pl_module)
+        else:
+            pl_module.load_state_dict(self._ema.module.state_dict())
 
     def _restore_live(self, pl_module: L.LightningModule) -> None:
         if self._backup is None:
             return
         pl_module.load_state_dict(self._backup)
         self._backup = None
+
+
+class ContiguousGradCallback(L.Callback):
+    """
+    Registers backward hooks that make non-contiguous gradients contiguous
+    before DDP bucket reduction.
+
+    Depthwise-conv layers (e.g. in ConvNeXt, EfficientNet) produce gradients
+    with strides that differ from what DDP's bucket view expects, causing the
+    warning:
+      "Grad strides do not match bucket view strides."
+    gradient_as_bucket_view=True alone does not suppress this because the
+    gradient is never created as the bucket view — the layout mismatch is in
+    cuDNN's depthwise backward kernel.  This hook copies only when needed
+    (is_contiguous() is False), so contiguous params have zero overhead.
+    """
+
+    def on_train_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        for param in pl_module.parameters():
+            if param.requires_grad:
+                param.register_hook(
+                    lambda g: g.contiguous() if not g.is_contiguous() else g
+                )
+
+
+# ---------------------------------------------------------------------------
+# Shared test-result logging helper
+# ---------------------------------------------------------------------------
+
+def log_test_results(
+    pl_module: L.LightningModule,
+    y_pred: np.ndarray,
+    y_true: np.ndarray,
+    num_classes: int,
+    prefix: str = "test",
+) -> None:
+    """
+    Log full-dataset test metrics to TensorBoard:
+      - Scalar: {prefix}/kappa, {prefix}/acc, {prefix}/precision_{i},
+                {prefix}/recall_{i}, {prefix}/f1_{i}  (per class)
+      - Text:   {prefix}/classification_report  (Text tab)
+      - Image:  {prefix}/confusion_matrix       (Images tab)
+
+    Only runs on global rank 0 (avoids duplicate DDP writes).
+    Flushes the SummaryWriter so data appears even if the process exits
+    immediately after.
+    """
+    # Always print on every rank so the Slurm log is complete.
+    labels = list(range(num_classes))
+    class_names = [f"DR{i}" for i in labels]
+
+    kappa = cohen_kappa_score(y_true, y_pred, weights="quadratic")
+    acc   = float((y_pred == y_true).mean())
+    per_prec, per_rec, per_f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, labels=labels, zero_division=0
+    )
+    report = classification_report(
+        y_true, y_pred,
+        labels=labels,
+        target_names=class_names,
+        digits=4,
+        zero_division=0,
+    )
+    print(f"\n{'='*60}\n{prefix.upper()} Results\n{'='*60}")
+    print(report)
+    print(f"Quadratic Weighted Kappa: {kappa:.4f}")
+
+    # Only rank 0 writes to TensorBoard.
+    if not pl_module.trainer.is_global_zero:
+        return
+    if pl_module.logger is None or not hasattr(pl_module.logger, "experiment"):
+        return
+    exp = pl_module.logger.experiment
+    if not hasattr(exp, "add_scalar"):
+        return
+
+    step = pl_module.global_step
+
+    # ── Scalars ──────────────────────────────────────────────────────────────
+    exp.add_scalar(f"{prefix}/kappa", kappa, step)
+    exp.add_scalar(f"{prefix}/acc",   acc,   step)
+    for i, name in enumerate(class_names):
+        exp.add_scalar(f"{prefix}/precision_{name}", float(per_prec[i]), step)
+        exp.add_scalar(f"{prefix}/recall_{name}",    float(per_rec[i]),  step)
+        exp.add_scalar(f"{prefix}/f1_{name}",        float(per_f1[i]),   step)
+
+    # ── Text (visible in TensorBoard → Text tab) ──────────────────────────────
+    exp.add_text(
+        f"{prefix}/classification_report",
+        f"<pre>{report}\nQuadratic Weighted Kappa: {kappa:.4f}</pre>",
+        step,
+    )
+
+    # ── Confusion matrix image (TensorBoard → Images tab) ─────────────────────
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
+    fig.colorbar(im, ax=ax)
+    ax.set(
+        xticks=labels, yticks=labels,
+        xticklabels=class_names, yticklabels=class_names,
+        xlabel="Predicted", ylabel="True",
+        title=f"{prefix} confusion matrix  (QWK={kappa:.3f})",
+    )
+    thresh = cm.max() / 2.0
+    for i in range(num_classes):
+        for j in range(num_classes):
+            ax.text(j, i, str(cm[i, j]),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black",
+                    fontsize=9)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=100)
+    buf.seek(0)
+    img = np.array(Image.open(buf).convert("RGB"))
+    plt.close(fig)
+
+    # TensorBoard expects [C, H, W]
+    exp.add_image(f"{prefix}/confusion_matrix", img.transpose(2, 0, 1), step)
+
+    # Flush so data is written to disk before the process exits.
+    exp.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +363,7 @@ class DRModel(L.LightningModule):
                 include_lowpass_channel=wavelet_include_lowpass_channel,
             )
             wavelet_ch = self.wavelet_transform.out_channels
-            input_channels = 3 + wavelet_ch
+            input_channels = wavelet_ch
         else:
             self.wavelet_transform = None
             input_channels = 3
@@ -271,8 +408,7 @@ class DRModel(L.LightningModule):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_wavelet_channel_input and self.wavelet_transform is not None:
-            wavelet = self.wavelet_transform(x)
-            x = torch.cat([x, wavelet], dim=1)
+            x = self.wavelet_transform(x)
         return self.model(x)
 
     # ── Steps ────────────────────────────────────────────────────────────────
@@ -347,27 +483,7 @@ class DRModel(L.LightningModule):
             return
         y_pred = torch.cat(self._test_preds).numpy()
         y_true = torch.cat(self._test_targets).numpy()
-        labels = list(range(self.num_classes))
-        report = classification_report(
-            y_true, y_pred,
-            labels=labels,
-            target_names=[f"class_{i}" for i in labels],
-            digits=4,
-            zero_division=0,
-        )
-        kappa = cohen_kappa_score(y_true, y_pred, weights="quadratic")
-        summary = f"Quadratic Kappa: {kappa:.4f}"
-        print("\nTest Classification Report:\n")
-        print(report)
-        print(summary)
-        if self.logger is not None and hasattr(self.logger, "experiment"):
-            exp = self.logger.experiment
-            if hasattr(exp, "add_text"):
-                exp.add_text(
-                    "test/classification_report",
-                    f"<pre>{report}\n{summary}</pre>",
-                    global_step=self.global_step,
-                )
+        log_test_results(self, y_pred, y_true, self.num_classes)
 
     # ── Optimiser ────────────────────────────────────────────────────────────
 

@@ -1,3 +1,6 @@
+# Dual-stream training configuration
+# Inherits the same structure as config.yaml but with dual-stream-specific defaults.
+
 # ── Data ─────────────────────────────────────────────────────────────────────
 train_csv_path: data/diabetic-retinopathy-dataset/train.csv
 val_csv_path:   data/diabetic-retinopathy-dataset/val.csv
@@ -10,35 +13,48 @@ seed: 42
 num_workers: 8
 logs_dir: logs
 checkpoint_dirpath: artifacts/checkpoints
-run_tag: "${model_name}_${balancing_mode}_wav${wavelet_levels}"
+run_tag: "${rgb_model_name}_${wav_model_name}_${fusion_type}_dual"
 
-# ── Model ────────────────────────────────────────────────────────────────────
-model_name: "efficientnet_b2"   # See src/models/factory.py TIMM_MODEL_REGISTRY
-model_source: "timm"          # kept for reference; factory is now always timm
-drop_rate: 0.3
-drop_path_rate: 0.2           # stochastic depth (ViTs and ConvNeXt benefit most)
-layer_lr_decay: 0.75          # layer-wise LR decay ratio (ViT families only)
-freeze_backbone: false
+# ── Dual-stream backbone names ────────────────────────────────────────────────
+rgb_model_name: "vit_base"     # heavy backbone for RGB stream
+wav_model_name: "efficientnet_b0"   # lightweight backbone for wavelet stream
+
+# ── Fusion ────────────────────────────────────────────────────────────────────
+fusion_type: "mlp"           # "mlp" | "cross_attention"
+fusion_hidden: 512
+fusion_dropout: 0.3
+fusion_num_heads: 8          # only used when fusion_type="cross_attention"
+
+# ── Wavelet stream ────────────────────────────────────────────────────────────
+wavelet_name: "sym2"         # symlet-2; outperforms haar on DR per literature
+wavelet_mode: "symmetric"
+wavelet_levels: 2            # J=2 decomposition (LL + LH/HL/HH at 2 scales)
+wavelet_include_lowpass_channel: true
 
 # ── Image & normalisation ────────────────────────────────────────────────────
-image_size: 260
-normalization_mode: "timm"    # "timm" | "imagenet" | "dataset_by_size"
+image_size: 224
+normalization_mode: "timm"   # uses rgb_model_name's data_config
 
 # ── Training recipe ──────────────────────────────────────────────────────────
-batch_size: 128
-learning_rate: 8e-5
+batch_size: 64               # lower than single-stream (two forward passes)
+learning_rate: 5e-5
 weight_decay: 1e-4
 max_epochs: 50
 precision: "bf16-mixed"
 gradient_clip_val: 1.0
 warmup_epochs: 4
 
+# ── Backbone regularisation ───────────────────────────────────────────────────
+drop_rate: 0.3
+drop_path_rate: 0.2
+freeze_backbone: false
+
 # ── EMA ──────────────────────────────────────────────────────────────────────
 use_ema: false
 ema_decay: 0.9998
 
 # ── Loss ─────────────────────────────────────────────────────────────────────
-loss_name: "cross_entropy"    # "cross_entropy" | "focal"
+loss_name: "cross_entropy"
 focal_gamma: 2.0
 label_smoothing: 0.1
 
@@ -49,7 +65,7 @@ cutmix_alpha: 1.0
 mixup_prob: 0.5
 
 # ── Class balancing ───────────────────────────────────────────────────────────
-balancing_mode: "naive_oversample"   # "naive_oversample" | "sampler" | "weighted_loss"
+balancing_mode: "naive_oversample"
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 use_scheduler: true
@@ -62,16 +78,9 @@ checkpoint_monitor_mode: "max"
 early_stopping_monitor: "val_loss"
 early_stopping_mode: "min"
 
-# ── TTA (test-time augmentation) ─────────────────────────────────────────────
+# ── TTA ──────────────────────────────────────────────────────────────────────
 tta_enabled: false
 tta_runs: 5
 
-# ── Wavelet channel input (single-stream only) ────────────────────────────────
-use_wavelet_channel_input: false
-wavelet_name: "haar"    # "symlet", "haar"
-wavelet_mode: "symmetric"
-wavelet_levels: 2
-wavelet_include_lowpass_channel: true
-
-# ── Multi-GPU (DDP) ──────────────────────────────────────────────────────────
-num_gpus: 1   # 1–3 for cluster
+# ── Multi-GPU ─────────────────────────────────────────────────────────────────
+num_gpus: 1
