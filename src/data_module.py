@@ -13,6 +13,50 @@ from torchvision.transforms import v2 as T
 from src.dataset import DRDataset
 
 
+class BalancedBatchSampler(torch.utils.data.Sampler):
+    """
+    Batch sampler that guarantees every batch contains exactly
+    ``batch_size // num_classes`` samples from each class.
+
+    Samples are drawn *with replacement* within each class so rare classes
+    are always represented regardless of their true count.  Pass this as
+    ``batch_sampler=`` to DataLoader (do not set batch_size / sampler /
+    shuffle / drop_last separately — they are incompatible with batch_sampler).
+
+    The number of batches per epoch is ``len(dataset) // effective_batch_size``
+    where ``effective_batch_size = samples_per_class * num_classes``.
+    """
+
+    def __init__(self, labels: np.ndarray, batch_size: int) -> None:
+        num_classes = int(labels.max()) + 1
+        # Round down to the nearest even number so effective_batch_size is
+        # always even — required by timm MixUp ("batch size should be even").
+        spc = batch_size // num_classes
+        self.samples_per_class = spc if spc % 2 == 0 else max(spc - 1, 2)
+        if self.samples_per_class < 2:
+            raise ValueError(
+                f"batch_size={batch_size} is too small for {num_classes} classes. "
+                f"Need at least batch_size >= {num_classes * 2}."
+            )
+        self.effective_batch_size = self.samples_per_class * num_classes
+        self.class_indices = [
+            np.where(labels == c)[0] for c in range(num_classes)
+        ]
+        self.num_batches = len(labels) // self.effective_batch_size
+
+    def __iter__(self):
+        for _ in range(self.num_batches):
+            batch: list[int] = []
+            for idx_arr in self.class_indices:
+                chosen = np.random.choice(idx_arr, size=self.samples_per_class, replace=True)
+                batch.extend(chosen.tolist())
+            np.random.shuffle(batch)
+            yield batch
+
+    def __len__(self) -> int:
+        return self.num_batches
+
+
 class DRDataModule(L.LightningDataModule):
     """
     PyTorch Lightning DataModule for diabetic retinopathy grading.
@@ -28,7 +72,10 @@ class DRDataModule(L.LightningDataModule):
 
     balancing_mode
         "naive_oversample" – duplicate minority rows in a sidecar CSV
-        "sampler"          – WeightedRandomSampler on the original CSV
+        "sampler"          – WeightedRandomSampler with 1/sqrt(count) weights
+        "balanced_batch"   – BalancedBatchSampler (guarantees class balance per batch)
+        "smote"            – load pre-generated SMOTE CSV (train_smote.csv); run
+                             scripts/generate_smote_images.py first to create it
         "weighted_loss"    – inverse-frequency class weights passed to loss
 
     use_mixup / mixup_*
@@ -64,6 +111,7 @@ class DRDataModule(L.LightningDataModule):
         self.balancing_mode = balancing_mode
 
         self.sampler = None
+        self.batch_sampler = None
         self.class_weights = None
 
         # ── Normalization ────────────────────────────────────────────────────
@@ -200,17 +248,33 @@ class DRDataModule(L.LightningDataModule):
             self.train_dataset = DRDataset(oversampled_csv, transform=self.train_transform)
             train_labels = self.train_dataset.labels.numpy()
 
-        elif self.balancing_mode in {"sampler", "weighted_sampler"}:
+        elif self.balancing_mode == "sampler":
             self.train_dataset = DRDataset(self.train_csv_path, transform=self.train_transform)
             train_labels = self.train_dataset.labels.numpy()
             counts = np.bincount(train_labels)
-            class_sample_weights = 1.0 / counts
+            class_sample_weights = 1.0 / np.sqrt(counts)
             sample_weights = class_sample_weights[train_labels]
             self.sampler = WeightedRandomSampler(
                 weights=sample_weights,
                 num_samples=len(train_labels),
                 replacement=True,
             )
+
+        elif self.balancing_mode == "balanced_batch":
+            self.train_dataset = DRDataset(self.train_csv_path, transform=self.train_transform)
+            train_labels = self.train_dataset.labels.numpy()
+            # BalancedBatchSampler guarantees samples_per_class samples from each class per batch
+            self.batch_sampler = BalancedBatchSampler(train_labels, self.batch_size)
+
+        elif self.balancing_mode == "smote":
+            smote_csv = self.train_csv_path.replace(".csv", "_smote.csv")
+            if not os.path.exists(smote_csv):
+                raise FileNotFoundError(
+                    f"SMOTE CSV not found: {smote_csv}\n"
+                    "Run scripts/generate_smote_images.py first to generate it."
+                )
+            self.train_dataset = DRDataset(smote_csv, transform=self.train_transform)
+            train_labels = self.train_dataset.labels.numpy()
 
         elif self.balancing_mode == "weighted_loss":
             self.train_dataset = DRDataset(self.train_csv_path, transform=self.train_transform)
@@ -225,7 +289,7 @@ class DRDataModule(L.LightningDataModule):
         else:
             raise ValueError(
                 f"Invalid balancing_mode '{self.balancing_mode}'. "
-                "Expected: naive_oversample, sampler, weighted_loss."
+                "Expected: naive_oversample, sampler, balanced_batch, smote, weighted_loss."
             )
 
         self.num_classes = len(np.unique(train_labels))
@@ -236,16 +300,26 @@ class DRDataModule(L.LightningDataModule):
             self.test_dataset = None
 
     def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=(self.sampler is None),
-            sampler=self.sampler,
-            drop_last=self.mixup_fn is not None,
-            num_workers=self.num_workers,
-            pin_memory=True,
-            persistent_workers=self.num_workers > 0,
-        )
+        # When using batch_sampler, batch_size/shuffle/sampler are ignored
+        if self.batch_sampler is not None:
+            return DataLoader(
+                self.train_dataset,
+                batch_sampler=self.batch_sampler,
+                num_workers=self.num_workers,
+                pin_memory=True,
+                persistent_workers=self.num_workers > 0,
+            )
+        else:
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.batch_size,
+                shuffle=(self.sampler is None),
+                sampler=self.sampler,
+                drop_last=self.mixup_fn is not None,
+                num_workers=self.num_workers,
+                pin_memory=True,
+                persistent_workers=self.num_workers > 0,
+            )
 
     def val_dataloader(self) -> DataLoader:
         return DataLoader(

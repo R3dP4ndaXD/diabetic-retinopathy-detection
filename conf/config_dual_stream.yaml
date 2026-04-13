@@ -13,11 +13,11 @@ seed: 42
 num_workers: 8
 logs_dir: logs
 checkpoint_dirpath: artifacts/checkpoints
-run_tag: "${rgb_model_name}_${wav_model_name}_${fusion_type}_dual_no_randaug"
+run_tag: "${rgb_model_name}_${wav_model_name}_${fusion_type}_${freq_stream}"
 
 # ── Dual-stream backbone names ────────────────────────────────────────────────
-rgb_model_name: "coatnet_2"     # heavy backbone for RGB stream
-wav_model_name: "convnext_base"   # lightweight backbone for wavelet stream
+rgb_model_name: "efficientnet_b2"     # heavy backbone for RGB stream
+wav_model_name: "efficientnet_b2"   # lightweight backbone for wavelet stream
 
 # ── Fusion ────────────────────────────────────────────────────────────────────
 fusion_type: "mlp"           # "mlp" | "cross_attention"
@@ -25,14 +25,28 @@ fusion_hidden: 512
 fusion_dropout: 0.3
 fusion_num_heads: 8          # only used when fusion_type="cross_attention"
 
-# ── Wavelet stream ────────────────────────────────────────────────────────────
-wavelet_name: "sym2"         # symlet-2; outperforms haar on DR per literature
+# ── Frequency stream: "wavelet" | "dct" | "fourier" | "fourier_hpf" ─────────
+freq_stream: "dwt"
+# wavelet options (freq_stream: "wavelet")
+wavelet_name: "haar"
 wavelet_mode: "symmetric"
-wavelet_levels: 2            # J=2 decomposition (LL + LH/HL/HH at 2 scales)
-wavelet_include_lowpass_channel: true   # include LL channel as input to wavelet stream
+wavelet_levels: 1
+wavelet_include_lowpass_channel: true
+# dct options (freq_stream: "dct")
+dct_block_size: 8
+dct_num_coeffs: 6
+# fourier options (freq_stream: "fourier")
+#   3 k-space channels: sign(Re)*log1p|Re|, sign(Im)*log1p|Im|, log1p|F|
+fourier_shift: true
+# fourier_hpf options (freq_stream: "fourier_hpf")
+#   FFT → zero-out low-freq circle → IFFT → pixel-space edges/vessels
+#   lpf_radius: fraction of min(H,W) to suppress around DC (0.05–0.25)
+#   grayscale: true → 1 output channel; false → 3 per-channel outputs
+fourier_hpf_radius: 0.1
+fourier_hpf_grayscale: false
 
 # ── Image & normalisation ────────────────────────────────────────────────────
-image_size: 224
+image_size: 260
 normalization_mode: "timm"   # uses rgb_model_name's data_config
 
 # ── Training recipe ──────────────────────────────────────────────────────────
@@ -59,7 +73,7 @@ focal_gamma: 2.0
 label_smoothing: 0.1
 
 # ── MixUp / CutMix ───────────────────────────────────────────────────────────
-use_mixup: true
+use_mixup: true   # incompatible with SupCon
 mixup_alpha: 0.4
 cutmix_alpha: 1.0
 mixup_prob: 0.5
@@ -81,6 +95,13 @@ early_stopping_mode: "min"
 # ── TTA ──────────────────────────────────────────────────────────────────────
 tta_enabled: false
 tta_runs: 5
+
+# ── Supervised Contrastive Learning ──────────────────────────────────────────
+# Dual-stream SupCon is free: f_rgb and f_wav are natural positive pairs.
+use_supcon: false
+supcon_weight: 0.2
+supcon_temperature: 0.07
+supcon_ordinal: true
 
 # ── Multi-GPU ─────────────────────────────────────────────────────────────────
 num_gpus: 1

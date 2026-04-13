@@ -5,14 +5,16 @@ Architecture
 ------------
 Input [B,3,H,W]
   ├── RGB stream   ──► heavy timm backbone ──► forward_head(pre_logits=True) ──► f_rgb [B, D_rgb]
-  └── Wavelet stream ──► WaveletChannelTransform(J=2) ──► light timm backbone
-                                                          ──► f_wav [B, D_wav]
+  └── Freq stream  ──► FreqTransform ──► light timm backbone ──► f_freq [B, D_freq]
+                        FreqTransform is one of:
+                          "wavelet"     → WaveletChannelTransform(J=2)   — 1+3J channels, H/2^J × W/2^J
+                          "dct"         → DCTChannelTransform             — k channels, H/B × W/B
+                          "fourier"     → FourierChannelTransform         — 3 channels (Re/Im/Mag), H × W
+                          "fourier_hpf" → FourierHighPassTransform        — 1 or 3 channels, H × W
                               ↓
-                     FusionHead(f_rgb, f_wav) ──► logits [B, num_classes]
+                     FusionHead(f_rgb, f_freq) ──► logits [B, num_classes]
 
-Both streams use their own timm data_config for normalization (handled externally
-by DualStreamDataModule or by normalizing with the RGB backbone's stats and
-letting the wavelet stream learn to adapt — the default approach here).
+Both streams use the RGB backbone's timm data_config for normalization by default.
 """
 from __future__ import annotations
 
@@ -30,7 +32,16 @@ from torchmetrics.functional import accuracy, cohen_kappa, f1_score, precision, 
 from torchvision.transforms import v2 as T
 
 from src.fusion import build_fusion_head
-from src.model import EMACallback, FocalLoss, WaveletChannelTransform, log_test_results
+from src.model import (
+    DCTChannelTransform,
+    EMACallback,
+    FocalLoss,
+    FourierChannelTransform,
+    FourierHighPassTransform,
+    SupConLoss,
+    WaveletChannelTransform,
+    log_test_results,
+)
 from src.models.factory import ModelFactory
 
 
@@ -39,11 +50,14 @@ class DualStreamDRModel(L.LightningModule):
     Parameters
     ----------
     rgb_model_name   : timm short-name for the RGB (heavy) backbone
-    wav_model_name   : timm short-name for the wavelet (light) backbone
+    wav_model_name   : timm short-name for the frequency-stream (light) backbone
     fusion_type      : "mlp" | "cross_attention"
-    wavelet_name     : wavelet family, e.g. "sym2", "haar", "db2"
-    wavelet_levels   : DWT decomposition levels (J). 2 recommended for DR.
-    wavelet_include_lowpass_channel : include the LL subband channel
+    freq_stream      : "wavelet" | "dct" | "fourier" | "fourier_hpf"
+    wavelet_name     : wavelet family (freq_stream="wavelet"), e.g. "sym2", "haar"
+    wavelet_levels   : DWT decomposition levels J (freq_stream="wavelet")
+    fourier_shift    : fftshift DC to centre (freq_stream="fourier")
+    fourier_hpf_radius   : low-freq cutoff radius as fraction of min(H,W)
+    fourier_hpf_grayscale: grayscale HPF output (1 ch) vs per-channel (3 ch)
     mixup_fn         : timm Mixup instance injected from DRDataModule
     """
 
@@ -69,14 +83,26 @@ class DualStreamDRModel(L.LightningModule):
         scheduler_monitor_mode: str = "max",
         tta_enabled: bool = False,
         tta_runs: int = 5,
+        # Frequency stream: "wavelet" | "dct" | "fourier" | "fourier_hpf"
+        freq_stream: str = "wavelet",
         wavelet_name: str = "sym2",
         wavelet_mode: str = "symmetric",
         wavelet_levels: int = 2,
         wavelet_include_lowpass_channel: bool = True,
+        dct_block_size: int = 8,
+        dct_num_coeffs: int = 6,
+        fourier_shift: bool = False,
+        fourier_hpf_radius: float = 0.1,
+        fourier_hpf_grayscale: bool = False,
         mixup_fn: Mixup | None = None,
         drop_rate: float = 0.3,
         drop_path_rate: float = 0.2,
         layer_lr_decay: float = 0.75,
+        # Supervised Contrastive Learning
+        use_supcon: bool = False,
+        supcon_weight: float = 0.2,
+        supcon_temperature: float = 0.07,
+        supcon_ordinal: bool = True,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "mixup_fn"])
@@ -92,15 +118,31 @@ class DualStreamDRModel(L.LightningModule):
         self.tta_runs = tta_runs
         self.mixup_fn = mixup_fn
         self.layer_lr_decay = layer_lr_decay
+        self.use_supcon = use_supcon
+        self.supcon_weight = supcon_weight
 
-        # ── Wavelet transform ────────────────────────────────────────────────
-        self.wavelet_transform = WaveletChannelTransform(
-            wave=wavelet_name,
-            mode=wavelet_mode,
-            J=wavelet_levels,
-            include_lowpass_channel=wavelet_include_lowpass_channel,
-        )
-        wav_input_channels = self.wavelet_transform.out_channels
+        # ── Frequency stream transform ────────────────────────────────────────
+        _fs = freq_stream.lower()
+        if _fs == "dct":
+            self.freq_transform = DCTChannelTransform(
+                block_size=dct_block_size,
+                num_coeffs=dct_num_coeffs,
+            )
+        elif _fs == "fourier":
+            self.freq_transform = FourierChannelTransform(shift=fourier_shift)
+        elif _fs == "fourier_hpf":
+            self.freq_transform = FourierHighPassTransform(
+                lpf_radius=fourier_hpf_radius,
+                grayscale=fourier_hpf_grayscale,
+            )
+        else:  # "wavelet" (default)
+            self.freq_transform = WaveletChannelTransform(
+                wave=wavelet_name,
+                mode=wavelet_mode,
+                J=wavelet_levels,
+                include_lowpass_channel=wavelet_include_lowpass_channel,
+            )
+        wav_input_channels = self.freq_transform.out_channels
 
         # ── RGB backbone (num_classes=0 → feature-extractor mode) ────────────
         self.rgb_backbone = ModelFactory(
@@ -135,6 +177,23 @@ class DualStreamDRModel(L.LightningModule):
             dropout=fusion_dropout,
             num_heads=fusion_num_heads,
         )
+
+        # ── Supervised Contrastive projection heads ───────────────────────────
+        if use_supcon:
+            self.proj_head_rgb = nn.Sequential(
+                nn.Linear(d_rgb, d_rgb), nn.ReLU(), nn.Linear(d_rgb, 128)
+            )
+            self.proj_head_wav = nn.Sequential(
+                nn.Linear(d_wav, d_wav), nn.ReLU(), nn.Linear(d_wav, 128)
+            )
+            self.supcon_criterion = SupConLoss(
+                temperature=supcon_temperature,
+                ordinal_weights=supcon_ordinal,
+            )
+        else:
+            self.proj_head_rgb = None
+            self.proj_head_wav = None
+            self.supcon_criterion = None
 
         # ── Loss ─────────────────────────────────────────────────────────────
         if loss_name == "focal":
@@ -175,8 +234,8 @@ class DualStreamDRModel(L.LightningModule):
         rgb_feats   = self.rgb_backbone.forward_features(x)
         f_rgb       = self.rgb_backbone.forward_head(rgb_feats, pre_logits=True)
 
-        # Wavelet stream
-        wav_input   = self.wavelet_transform(x)
+        # Frequency stream
+        wav_input   = self.freq_transform(x)
         wav_feats   = self.wav_backbone.forward_features(wav_input)
         f_wav       = self.wav_backbone.forward_head(wav_feats, pre_logits=True)
 
@@ -190,11 +249,30 @@ class DualStreamDRModel(L.LightningModule):
 
     def training_step(self, batch):
         x, y = batch
+
+        # ── Supervised Contrastive auxiliary loss (free: uses existing views) ─
+        # f_rgb and f_wav are two complementary representations of the same
+        # image — no extra augmented pass needed.
+        f_rgb, f_wav = self._encode(x)
+        supcon_loss = torch.tensor(0.0, device=x.device)
+        if self.use_supcon and self.proj_head_rgb is not None:
+            z_rgb = self.proj_head_rgb(f_rgb)  # [B, 128]
+            z_wav = self.proj_head_wav(f_wav)  # [B, 128]
+            z = torch.stack([z_rgb, z_wav], dim=1)  # [B, 2, 128]
+            supcon_loss = self.supcon_criterion(z, y)
+
+        # ── Classification loss ───────────────────────────────────────────────
         if self.mixup_fn is not None:
             x, y = self.mixup_fn(x, y)
-        logits = self(x)
-        loss = self.criterion(logits, y)
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True,
+            logits = self(x)
+        else:
+            logits = self.fusion_head(f_rgb, f_wav)  # reuse already-encoded features
+        ce_loss = self.criterion(logits, y)
+
+        loss = ce_loss + self.supcon_weight * supcon_loss
+        self.log("train_ce_loss",     ce_loss,     on_step=True, on_epoch=True, sync_dist=True)
+        self.log("train_supcon_loss", supcon_loss, on_step=True, on_epoch=True, sync_dist=True)
+        self.log("train_loss",        loss,        on_step=True, on_epoch=True, prog_bar=True,
                  sync_dist=True)
         return loss
 
@@ -285,7 +363,11 @@ class DualStreamDRModel(L.LightningModule):
                     schedulers=[warmup, cosine],
                     milestones=[self.warmup_epochs],
                 )
-                configuration["lr_scheduler"] = {"scheduler": scheduler}
+                configuration["lr_scheduler"] = {
+                    "scheduler": scheduler,
+                    "interval": "epoch",
+                    "frequency": 1,
+                }
             else:
                 reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
                     optimizer,

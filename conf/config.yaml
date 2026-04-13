@@ -10,7 +10,7 @@ seed: 42
 num_workers: 8
 logs_dir: logs
 checkpoint_dirpath: artifacts/checkpoints
-run_tag: "${model_name}_${balancing_mode}_wavelet_harr_1level_LL"
+run_tag: "${model_name}_${balancing_mode}_fourier_shift"
 
 # ── Model ────────────────────────────────────────────────────────────────────
 model_name: "efficientnet_b2"   # See src/models/factory.py TIMM_MODEL_REGISTRY
@@ -49,7 +49,7 @@ cutmix_alpha: 1.0
 mixup_prob: 0.5
 
 # ── Class balancing ───────────────────────────────────────────────────────────
-balancing_mode: "naive_oversample"   # "naive_oversample" | "sampler" | "weighted_loss"
+balancing_mode: "naive_oversample"   # "naive_oversample" | "sampler" | "balanced_batch" | "weighted_loss" | "smote"
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 use_scheduler: true
@@ -66,12 +66,32 @@ early_stopping_mode: "min"
 tta_enabled: false
 tta_runs: 5
 
-# ── Wavelet channel input (single-stream only) ────────────────────────────────
-use_wavelet_channel_input: true
-wavelet_name: "haar"    # "symlet", "haar"
+# ── Frequency channel input: "none" | "wavelet" | "dct" | "fourier" | "fourier_hpf" ──
+freq_transform: "fourier"
+# wavelet options (freq_transform: "wavelet")
+wavelet_name: "haar"
 wavelet_mode: "symmetric"
 wavelet_levels: 1
 wavelet_include_lowpass_channel: true
+# dct options (freq_transform: "dct")
+dct_block_size: 8        # block side length (8 = JPEG standard)
+dct_num_coeffs: 6        # zigzag-ordered coefficients to keep per block
+# fourier options (freq_transform: "fourier")
+#   3 k-space channels: sign(Re)*log1p|Re|, sign(Im)*log1p|Im|, log1p|F|
+#   Adapted from MRIQA (ICME 2024). shift=true puts DC at centre (more interpretable).
+fourier_shift: true
+# fourier_hpf options (freq_transform: "fourier_hpf")
+#   FFT → zero-out low-freq circle → IFFT → pixel-space edges/vessels
+#   lpf_radius: fraction of min(H,W) to remove around DC (0.05–0.25)
+#   grayscale: true → 1 output channel; false → 3 per-channel outputs
+fourier_hpf_radius: 0.1
+fourier_hpf_grayscale: false
+
+# ── Supervised Contrastive Learning ──────────────────────────────────────────
+use_supcon: false              # auxiliary SupCon loss (incompatible with use_mixup=true)
+supcon_weight: 0.2             # loss = CE + supcon_weight * SupCon
+supcon_temperature: 0.07       # lower = harder negatives
+supcon_ordinal: false           # weight negatives by |grade_i - grade_j|
 
 # ── Multi-GPU (DDP) ──────────────────────────────────────────────────────────
 num_gpus: 1   # 1–3 for cluster

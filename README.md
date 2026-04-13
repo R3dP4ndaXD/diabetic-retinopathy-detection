@@ -249,3 +249,14 @@ Test QWK (meta-learner, cross_attention):   0.7792
 
 ./scripts/submit_slurm_train_meta.sh \
   --base-checkpoints artifacts/checkpoints/run-2026-04-05-04-24-52-efficientnetv2_m_naive_oversample/epoch\=23-step\=38688-val_loss\=0.83-val_acc\=0.82-val_kappa\=0.72.ckpt artifacts/checkpoints/run-2026-04-05-02-51-31-coatnet_2_naive_oversample/epoch\=5-step\=4836-val_loss\=0.87-val_acc\=0.78-val_kappa\=0.71.ckpt artifacts/checkpoints/run-2026-04-04-19-53-42-swin_base_naive_oversample_no_ema/epoch\=33-step\=54808-val_loss\=0.86-val_acc\=0.83-val_kappa\=0.73.ckpt artifacts/checkpoints/run-2026-04-04-17-26-17-convnext_base_efficientnet_b0_mlp_dual/epoch\=23-step\=77400-val_loss\=0.87-val_acc\=0.82-val_kappa\=0.71.ckpt artifacts/checkpoints/run-2026-04-04-16-19-21-efficientnet_b2_naive_oversample_no_ema/epoch\=30-step\=24986-val_loss\=0.88-val_acc\=0.78-val_kappa\=0.69.ckpt artifacts/checkpoints/run-2026-04-04-14-33-54-convnext_base_naive_oversample/epoch\=23-step\=38688-val_loss\=0.88-val_acc\=0.81-val_kappa\=0.72.ckpt --image-sizes 416 224 256 224 260 224 --test-csv data/diabetic-retinopathy-dataset/test.csv  --val-csv data/diabetic-retinopathy-dataset/val.csv --fusion-type mlp
+
+
+
+  scp -o StrictHostKeyChecking=yes -i "$HOME/.ssh/id_fep" andrei.iacob1009@fep8.grid.pub.ro:/export/home/acs/stud/a/andrei.iacob1009/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset/train.csv ./data/diabetic-retinopathy-dataset/resized/
+
+ scp -o StrictHostKeyChecking=yes -i "$HOME/.ssh/id_fep" andrei.iacob1009@fep8.grid.pub.ro:/export/home/acs/stud/a/andrei.iacob1009/diabetic-retinopathy-detection/artifacts/checkpoints/run-2026-04-05-15-30-12-convnext_base_naive_oversample/epoch\=16-step\=13702-val_loss\=0.89-val_acc\=0.81-val_kappa\=0.72.ckpt .
+
+ scp -o StrictHostKeyChecking=yes -r -i "$HOME/.ssh/id_fep" andrei.iacob1009@fep8.grid.pub.ro:/export/home/acs/stud/a/andrei.iacob1009/diabetic-retinopathy-detection/diabetic-retinopathy-dataset/ .
+
+
+scp -o StrictHostKeyChecking=yes -r -i "$HOME/.ssh/id_fep" andrei.iacob1009@fep8.grid.pub.ro:/export/home/acs/stud/a/andrei.iacob1009/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset/smote_synthetic/grade_1 ./

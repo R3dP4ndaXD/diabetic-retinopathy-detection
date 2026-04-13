@@ -104,13 +104,23 @@ def train(cfg: DictConfig) -> None:
         scheduler_monitor_mode=cfg.get("scheduler_monitor_mode", "max"),
         tta_enabled=cfg.get("tta_enabled", False),
         tta_runs=cfg.get("tta_runs", 5),
+        freq_stream=cfg.get("freq_stream", "wavelet"),
         wavelet_name=cfg.get("wavelet_name", "sym2"),
         wavelet_mode=cfg.get("wavelet_mode", "symmetric"),
         wavelet_levels=cfg.get("wavelet_levels", 2),
         wavelet_include_lowpass_channel=cfg.get("wavelet_include_lowpass_channel", True),
+        dct_block_size=cfg.get("dct_block_size", 8),
+        dct_num_coeffs=cfg.get("dct_num_coeffs", 6),
+        fourier_shift=cfg.get("fourier_shift", False),
+        fourier_hpf_radius=cfg.get("fourier_hpf_radius", 0.1),
+        fourier_hpf_grayscale=cfg.get("fourier_hpf_grayscale", False),
         mixup_fn=dm.mixup_fn,
         drop_rate=cfg.get("drop_rate", 0.3),
         drop_path_rate=cfg.get("drop_path_rate", 0.2),
+        use_supcon=cfg.get("use_supcon", False),
+        supcon_weight=cfg.get("supcon_weight", 0.2),
+        supcon_temperature=cfg.get("supcon_temperature", 0.07),
+        supcon_ordinal=cfg.get("supcon_ordinal", True),
     )
 
     # ── Logger ────────────────────────────────────────────────────────────────
