@@ -26,17 +26,18 @@ def _assert_all_image_paths_exist(df: pd.DataFrame, csv_path: str, split_name: s
     )
 
 
-def _patient_id_from_image_path(image_path: str) -> str:
+def _patient_id_from_image_path(image_path: str) -> tuple[str, bool]:
     """
     Extract patient id from EyePACS-like filenames:
       - <patient_id>_left.jpeg
       - <patient_id>_right.jpeg
-    Falls back to full stem when the pattern is not present.
+    Falls back to the full stem when the pattern is not present; the second
+    return value is True on a fallback so callers can log the rate.
     """
     stem = os.path.splitext(os.path.basename(image_path))[0]
     if stem.endswith("_left") or stem.endswith("_right"):
-        return stem.rsplit("_", 1)[0]
-    return stem
+        return stem.rsplit("_", 1)[0], False
+    return stem, True
 
 
 def load_train_data(data_dir: str, csv_path: str) -> pd.DataFrame:
@@ -71,7 +72,19 @@ def main(
     df_test = load_test_data(test_data_dir or data_dir, test_labels_csv, usage=test_usage)
 
     labels = df_train_all["label"].to_numpy()
-    groups = df_train_all["image_path"].apply(_patient_id_from_image_path).to_numpy()
+    parsed = df_train_all["image_path"].apply(_patient_id_from_image_path)
+    groups = parsed.apply(lambda t: t[0]).to_numpy()
+    fallback_count = int(parsed.apply(lambda t: t[1]).sum())
+    fallback_fraction = fallback_count / len(df_train_all)
+    if fallback_count:
+        print(
+            f"[split_dataset] Patient-id fallback (stem == group) used for "
+            f"{fallback_count}/{len(df_train_all)} rows "
+            f"({fallback_fraction:.2%}). Non-EyePACS filenames will be treated "
+            "as one patient per image."
+        )
+    else:
+        print("[split_dataset] All filenames matched _left/_right pattern.")
 
     n_splits = max(2, int(round(1.0 / val_size)))
     splitter = StratifiedGroupKFold(

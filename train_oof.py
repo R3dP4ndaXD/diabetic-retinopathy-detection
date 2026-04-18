@@ -210,10 +210,10 @@ def train_oof(cfg: DictConfig) -> None:
             filename="{epoch}-{step}-{val_loss:.2f}-{val_acc:.2f}-{val_f1:.2f}-{val_kappa:.2f}",
         )
         early_stop = EarlyStopping(
-            monitor=cfg.get("early_stopping_monitor", "val_loss"),
-            patience=7,
+            monitor=cfg.get("early_stopping_monitor", "val_kappa"),
+            patience=cfg.get("early_stopping_patience", 10),
             verbose=True,
-            mode=cfg.get("early_stopping_mode", "min"),
+            mode=cfg.get("early_stopping_mode", "max"),
         )
 
         callbacks = [

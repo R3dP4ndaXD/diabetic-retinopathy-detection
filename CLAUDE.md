@@ -84,7 +84,7 @@ python scripts/split_dataset.py \
 NUM_GPUS=3 \
 APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu128.sif \
 DATASET_DIR=~/diabetic-retinopathy-detection/data/... \
-./scripts/submit_slurm_apptainer.sh model_name=convnext_base image_size=224 batch_size=128
+./scripts/submit_slurm_train_apptainer.sh model_name=convnext_base image_size=224 batch_size=128
 
 # Dual-stream training
 NUM_GPUS=2 APPTAINER_IMAGE=... DATASET_DIR=... \
@@ -123,7 +123,6 @@ train.py  (Hydra, conf/config.yaml)
   ├─ ModelFactory → TimmModel  (src/models/factory.py)  creates timm backbone
   ├─ DRDataModule              (src/data_module.py)      CSV + augmentation
   └─ DRModel                   (src/model.py)            LightningModule
-       └─ EMACallback          (src/model.py)            swaps to EMA at eval
 ```
 
 `train.py` creates the model first, reads `model.data_config` (timm's recommended mean/std), then passes it to `DRDataModule` for normalization.
@@ -181,7 +180,7 @@ train_meta_xgb.py  (argparse)
 | File | Role |
 |---|---|
 | `src/models/factory.py` | `TimmModel`, `TIMM_MODEL_REGISTRY`, normalization helpers |
-| `src/model.py` | `DRModel` LightningModule + `EMACallback` |
+| `src/model.py` | `DRModel` LightningModule; enumerated D4 TTA; MC Dropout |
 | `src/dual_stream_model.py` | `DualStreamDRModel` LightningModule |
 | `src/fusion.py` | `MLPFusionHead`, `CrossAttentionFusionHead` |
 | `src/ensemble.py` | `EnsemblePredictor` (inference-only soft voting) |
@@ -200,7 +199,6 @@ train_meta_xgb.py  (argparse)
 | `balancing_mode` | `naive_oversample` \| `sampler` \| `weighted_loss` \| `smote` | `smote` requires pre-generated SMOTE images via `scripts/generate_smote_images.py` |
 | `loss_name` | `cross_entropy` \| `focal` | |
 | `use_mixup` | `true` \| `false` | MixUp + CutMix via timm |
-| `use_ema` | `true` \| `false` | EMA weights used at val/test |
 | `num_gpus` | `1`–`3` | DDP activated automatically when > 1 |
 | `drop_path_rate` | `0.0`–`0.4` | stochastic depth; key for ViTs/ConvNeXt |
 | `freq_transform` | `none` \| `wavelet` \| `dct` \| `fourier` \| `fourier_hpf` | appends frequency channels to RGB input in single-stream model |
@@ -245,7 +243,6 @@ Primary: `val_kappa` (quadratic weighted Cohen's kappa). Also logged: `acc`, `pr
 
 - `normalization_mode='timm'` requires the model to be instantiated before the DataModule so the data_config can be read. `train.py` and `train_dual_stream.py` handle this order.
 - `dataset_by_size` normalization only supports `image_size` 224 or 260. For other sizes use `imagenet`.
-- EMA: the EMACallback swaps to EMA weights before every validation and test epoch, then restores live weights. Checkpoints therefore always save the *live* weights; apply EMA manually if needed at inference.
 - DDP (`num_gpus > 1`): `sync_dist=True` is set on all `.log()` calls. The `strategy` is `ddp_find_unused_parameters_false` for efficiency.
 - The container targets CUDA 12.8 + PyTorch 2.9.1 (`container/apptainer.def`). Rebuild the `.sif` before running on H100s if you haven't already.
 - `src/config_checks.py:validate_training_recipe` is called at the start of `train.py`, `train_dual_stream.py`, and `train_oof.py`. It raises `ValueError` for hard incompatibilities (e.g. `mc_dropout_enabled=true` with `drop_rate=0`) and emits warnings for soft conflicts (e.g. MixUp + FocalLoss). Set `strict_compatibility_checks=false` to downgrade errors to warnings.

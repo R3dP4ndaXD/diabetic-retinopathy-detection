@@ -80,25 +80,18 @@ balancing_mode: "naive_oversample"
 # ── Scheduler ────────────────────────────────────────────────────────────────
 use_scheduler: true
 scheduler_type: "auto"   # "auto" | "warmup_cosine" | "plateau"
-scheduler_monitor: "val_loss"
-scheduler_monitor_mode: "min"
+scheduler_monitor: "val_kappa"
+scheduler_monitor_mode: "max"
 
 # ── Checkpointing & early stopping ───────────────────────────────────────────
 checkpoint_monitor: "val_kappa"
 checkpoint_monitor_mode: "max"
-early_stopping_monitor: "val_loss"
-early_stopping_mode: "min"
+early_stopping_monitor: "val_kappa"
+early_stopping_mode: "max"
+early_stopping_patience: 10
 
 # ── TTA ──────────────────────────────────────────────────────────────────────
 tta_enabled: false
-tta_runs: 5
-
-# ── Supervised Contrastive Learning ──────────────────────────────────────────
-# Dual-stream SupCon is free: f_rgb and f_wav are natural positive pairs.
-use_supcon: false
-supcon_weight: 0.2
-supcon_temperature: 0.07
-supcon_ordinal: true
 
 # ── Multi-GPU ─────────────────────────────────────────────────────────────────
 num_gpus: 1

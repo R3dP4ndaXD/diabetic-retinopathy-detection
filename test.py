@@ -79,13 +79,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tta",
         action="store_true",
-        help="Enable test-time augmentation (average predictions over multiple augmented views).",
-    )
-    parser.add_argument(
-        "--tta-runs",
-        type=int,
-        default=5,
-        help="Number of augmented views per image when TTA is enabled.",
+        help=(
+            "Enable test-time augmentation. Averages softmax probabilities over "
+            "the full D4 group minus vertical flips: 4 rotations × {id, HFlip} "
+            "= 8 deterministic views per image."
+        ),
     )
     parser.add_argument(
         "--mc-dropout",
@@ -276,8 +274,7 @@ def main() -> None:
     # Non-MC path keeps the existing Lightning test loop.
     if args.tta:
         model.tta_enabled = True
-        model.tta_runs = args.tta_runs
-        print(f"TTA enabled with {args.tta_runs} augmented views per image")
+        print("TTA enabled: 8 enumerated D4 views per image (no vertical flip).")
 
     trainer = L.Trainer(
         accelerator="auto",
@@ -300,12 +297,7 @@ def main() -> None:
                 images = images.to(device)
 
                 if args.tta:
-                    avg_probs = torch.zeros(images.size(0), model.num_classes, device=device)
-                    for _ in range(args.tta_runs):
-                        augmented = model._tta_transform(images)
-                        logits = model(augmented)
-                        avg_probs += torch.softmax(logits, dim=1)
-                    probs = avg_probs / args.tta_runs
+                    probs = model.tta_d4_predict(images)
                 else:
                     logits = model(images)
                     probs = torch.softmax(logits, dim=1)

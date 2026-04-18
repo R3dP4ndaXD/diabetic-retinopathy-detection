@@ -116,10 +116,6 @@ def train(cfg: DictConfig) -> None:
         mixup_fn=dm.mixup_fn,
         drop_rate=cfg.get("drop_rate", 0.3),
         drop_path_rate=cfg.get("drop_path_rate", 0.2),
-        use_supcon=cfg.get("use_supcon", False),
-        supcon_weight=cfg.get("supcon_weight", 0.2),
-        supcon_temperature=cfg.get("supcon_temperature", 0.07),
-        supcon_ordinal=cfg.get("supcon_ordinal", True),
     )
 
     # ── Logger ────────────────────────────────────────────────────────────────
@@ -141,10 +137,10 @@ def train(cfg: DictConfig) -> None:
         checkpoint_cb,
         LearningRateMonitor(logging_interval="step"),
         EarlyStopping(
-            monitor=cfg.get("early_stopping_monitor", "val_loss"),
-            patience=7,
+            monitor=cfg.get("early_stopping_monitor", "val_kappa"),
+            patience=cfg.get("early_stopping_patience", 10),
             verbose=True,
-            mode=cfg.get("early_stopping_mode", "min"),
+            mode=cfg.get("early_stopping_mode", "max"),
         ),
         ContiguousGradCallback(),
         ModelProfilerCallback(image_size=image_size),

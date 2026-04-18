@@ -87,7 +87,6 @@ def train(cfg: DictConfig) -> None:
         scheduler_monitor=cfg.get("scheduler_monitor", "val_kappa"),
         scheduler_monitor_mode=cfg.get("scheduler_monitor_mode", "max"),
         tta_enabled=cfg.get("tta_enabled", False),
-        tta_runs=cfg.get("tta_runs", 5),
         freq_transform=cfg.get("freq_transform", "none"),
         wavelet_name=cfg.get("wavelet_name", "haar"),
         wavelet_mode=cfg.get("wavelet_mode", "symmetric"),
@@ -124,10 +123,10 @@ def train(cfg: DictConfig) -> None:
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
     early_stop  = EarlyStopping(
-        monitor=cfg.get("early_stopping_monitor", "val_loss"),
-        patience=7,
+        monitor=cfg.get("early_stopping_monitor", "val_kappa"),
+        patience=cfg.get("early_stopping_patience", 10),
         verbose=True,
-        mode=cfg.get("early_stopping_mode", "min"),
+        mode=cfg.get("early_stopping_mode", "max"),
     )
 
     callbacks = [checkpoint_cb, lr_monitor, early_stop, ContiguousGradCallback(), ModelProfilerCallback(image_size=image_size)]

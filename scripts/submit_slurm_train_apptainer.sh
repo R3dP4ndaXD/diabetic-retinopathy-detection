@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Submit a single-model training job.
 # Usage:
-#   NUM_GPUS=2 APPTAINER_IMAGE=... DATASET_DIR=... ./scripts/submit_slurm_apptainer.sh \
+#   NUM_GPUS=2 APPTAINER_IMAGE=... DATASET_DIR=... ./scripts/submit_slurm_train_apptainer.sh \
 #       model_name=convnext_base image_size=224 batch_size=64
 
 set -euo pipefail

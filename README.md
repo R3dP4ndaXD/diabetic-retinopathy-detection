@@ -32,7 +32,7 @@ scripts/
   sync_to_fep.sh
   sync_dataset_to_fep.sh
   sync_apptainer_to_fep.sh
-  submit_slurm_apptainer.sh
+  submit_slurm_train_apptainer.sh
   slurm_train_apptainer.sh
 container/
   apptainer.def
@@ -128,7 +128,7 @@ cd ~/diabetic-retinopathy-detection
 export APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu128.sif
 export DATASET_DIR=~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset_ben
 
-./scripts/submit_slurm_apptainer.sh
+./scripts/submit_slurm_train_apptainer.sh
 ```
 
 The Slurm batch job binds the dataset directly as `/data` inside the container (no staging copy to `$TMPDIR`).
@@ -145,7 +145,7 @@ GRES=gpu:1 \
 CPUS_PER_TASK=16 \
 MEMORY=64G \
 TIME_LIMIT=12:00:00 \
-./scripts/submit_slurm_apptainer.sh batch_size=64 num_workers=16 model_name=resnet50
+./scripts/submit_slurm_train_apptainer.sh batch_size=64 num_workers=16 model_name=resnet50
 ```
 
 ### Slurm environment variables

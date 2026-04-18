@@ -5,6 +5,7 @@ from albumentations.pytorch import ToTensorV2
 import lightning as L
 import numpy as np
 import pandas as pd
+import random
 import torch
 import os
 from sklearn.utils.class_weight import compute_class_weight
@@ -14,6 +15,19 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision.transforms import v2 as T
 
 from src.dataset import DRDataset
+
+
+def _worker_init_fn(worker_id: int) -> None:
+    """
+    Seed NumPy and Python's `random` per DataLoader worker. Without this, every
+    worker inherits the same NumPy seed at process fork and Albumentations /
+    NumPy-based augmentations produce the same sequence across epochs inside
+    a worker. `torch.initial_seed()` already differs per-worker per-epoch
+    because Lightning/PyTorch seed workers with `base_seed + worker_id`.
+    """
+    seed = (torch.initial_seed() + worker_id) % (2**32)
+    np.random.seed(seed)
+    random.seed(seed)
 
 
 class AlbumentationsWrapper(nn.Module):
@@ -254,6 +268,7 @@ class DRDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
+            worker_init_fn=_worker_init_fn,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -263,6 +278,7 @@ class DRDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
+            worker_init_fn=_worker_init_fn,
         )
 
     def test_dataloader(self) -> DataLoader:
@@ -274,4 +290,5 @@ class DRDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
+            worker_init_fn=_worker_init_fn,
         )

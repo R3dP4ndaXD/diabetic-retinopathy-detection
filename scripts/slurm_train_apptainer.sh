@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Slurm batch job script — single-model training.
-# Executed inside the allocation by submit_slurm_apptainer.sh.
+# Executed inside the allocation by submit_slurm_train_apptainer.sh.
 
 set -euo pipefail
 

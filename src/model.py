@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import random
 import time
+import warnings
 
 import torch_dct
 
@@ -68,77 +69,6 @@ class FocalLoss(nn.Module):
             label_smoothing=self.label_smoothing,
         )
         return ((1 - pt) ** self.gamma * ce_weighted).mean()
-
-
-# ---------------------------------------------------------------------------
-# Supervised Contrastive Loss
-# ---------------------------------------------------------------------------
-
-class SupConLoss(nn.Module):
-    """
-    Supervised Contrastive Loss (Khosla et al., NeurIPS 2020).
-
-    Pulls together embeddings of the same class while pushing apart those of
-    different classes within the batch.
-
-    Parameters
-    ----------
-    temperature : float
-        Softmax temperature τ. Lower = harder negatives. Paper default: 0.07.
-    ordinal_weights : bool
-        If True, scale the loss contribution of each (anchor, negative) pair
-        by |y_i - y_j| + 1, so distant DR grades are pushed harder than
-        adjacent ones.  Positives (same class) are always weight 1.
-    """
-
-    def __init__(self, temperature: float = 0.07, ordinal_weights: bool = False) -> None:
-        super().__init__()
-        self.temperature = temperature
-        self.ordinal_weights = ordinal_weights
-
-    def forward(
-        self,
-        features: torch.Tensor,  # [B, n_views, D]  — will be L2-normalised here
-        labels: torch.Tensor,    # [B]  integer class labels
-    ) -> torch.Tensor:
-        B, n_views, D = features.shape
-        device = features.device
-
-        # Flatten → [N, D] and L2-normalise
-        flat = F.normalize(features.reshape(B * n_views, D), dim=1)
-
-        # Repeat labels so each view has its label
-        labels_rep = labels.repeat_interleave(n_views)  # [N]
-
-        # Cosine-similarity matrix scaled by temperature
-        sim = torch.mm(flat, flat.T) / self.temperature  # [N, N]
-
-        N = B * n_views
-        self_mask = torch.eye(N, device=device, dtype=torch.bool)
-        pos_mask  = (labels_rep.unsqueeze(0) == labels_rep.unsqueeze(1)) & ~self_mask
-
-        if not pos_mask.any():
-            # No positives in this batch (all different classes) — skip gracefully
-            return flat.sum() * 0.0
-
-        # Numerically stable log-sum-exp over all non-self pairs
-        sim_max = sim.detach().max(dim=1, keepdim=True).values
-        exp_sim  = torch.exp(sim - sim_max).masked_fill(self_mask, 0.0)
-        log_denom = torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8) + sim_max
-
-        # log-likelihood for each (anchor, positive) pair
-        log_prob = sim - log_denom  # [N, N]
-
-        if self.ordinal_weights:
-            dist = (labels_rep.unsqueeze(0) - labels_rep.unsqueeze(1)).abs().float()
-            # positives have dist=0 → weight 1; negatives have dist≥1 → weight ≥2
-            weight = dist + 1.0
-            log_prob = log_prob * weight
-
-        # Average log-prob over positives per anchor
-        pos_count = pos_mask.sum(dim=1).clamp(min=1)
-        loss = -(log_prob * pos_mask).sum(dim=1) / pos_count
-        return loss.mean()
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +557,22 @@ def log_test_results(
 # Main LightningModule
 # ---------------------------------------------------------------------------
 
-_VIT_FAMILIES = {"vit_base", "swin_base"}
+# Models known to expose timm's `group_matcher`, so `param_groups_layer_decay`
+# can split params into depth-ordered groups. Widened from ViT-only to cover
+# every ConvNeXt / CoAtNet / MaxViT / EfficientNet backbone in the registry.
+_LAYER_DECAY_MODELS = {
+    "vit_base",
+    "swin_base",
+    "convnext_tiny",
+    "convnext_base",
+    "convnext_large",
+    "coatnet_2",
+    "maxvit_base",
+    "efficientnetv2_m",
+    "efficientnetv2_s",
+    "efficientnet_b0",
+    "efficientnet_b2",
+}
 
 
 class DRModel(L.LightningModule):
@@ -648,7 +593,10 @@ class DRModel(L.LightningModule):
         scheduler_monitor: str = "val_kappa",
         scheduler_monitor_mode: str = "max",
         tta_enabled: bool = False,
-        tta_runs: int = 5,
+        # `tta_runs` is deprecated: TTA now enumerates D4 views deterministically
+        # (8 views per image). Retained as a keyword arg only so existing
+        # checkpoints that saved `tta_runs` in their hparams still load.
+        tta_runs: int | None = None,  # noqa: ARG002  (kept for ckpt compat)
         # Frequency channel input: "none" | "wavelet" | "dct" | "fourier" | "fourier_hpf"
         freq_transform: str = "none",
         # Wavelet options (used when freq_transform="wavelet")
@@ -684,7 +632,6 @@ class DRModel(L.LightningModule):
         self.scheduler_monitor = scheduler_monitor
         self.scheduler_monitor_mode = scheduler_monitor_mode
         self.tta_enabled = tta_enabled
-        self.tta_runs = tta_runs
         self.layer_lr_decay = layer_lr_decay
         self.mixup_fn = mixup_fn
         self.mc_dropout_enabled = mc_dropout_enabled
@@ -719,6 +666,10 @@ class DRModel(L.LightningModule):
             self.freq_transform_layer = None
             input_channels = 3
         self._use_freq_transform = self.freq_transform_layer is not None
+        # Stored so forward() can assert post-transform channel count matches
+        # the backbone's expected in_chans on the first batch.
+        self._backbone_in_chans = input_channels
+        self._channel_check_done = False
 
         # ── Backbone ─────────────────────────────────────────────────────────
         self.model = ModelFactory(
@@ -772,11 +723,19 @@ class DRModel(L.LightningModule):
         }, prefix="val_")
         self._test_prob_metrics = self._val_prob_metrics.clone(prefix="test_")
 
-        # ── TTA augmentations ─────────────────────────────────────────────────
+        # ── TTA: enumerated D4 (rotations) × {id, hflip}. VFlip is *omitted*
+        # because fundus images have a hard up/down axis (optic disc ↔ macula)
+        # and a vertical flip produces an anatomically impossible view. Result:
+        # 4 × 2 = 8 deterministic forward passes averaged in probability space.
+        # `tta_runs` is accepted for ckpt-load compatibility but unused.
+        self._tta_rotations = (0, 1, 2, 3)
+        self._tta_flip = (False, True)
+        # Legacy random-view transform retained for callers in src/ensemble.py,
+        # train_oof.py, and test_ensemble.py that still drive per-view TTA
+        # externally. New code should use `tta_d4_predict` instead.
         self._tta_transform = T.Compose([
             T.RandomHorizontalFlip(p=0.5),
-            T.RandomVerticalFlip(p=0.5),
-            T.Lambda(lambda x: torch.rot90(x, k=random.randint(0, 3), dims=[-2, -1])),
+            T.Lambda(lambda t: torch.rot90(t, k=random.randint(0, 3), dims=[-2, -1])),
         ])
 
         self._test_preds: list[torch.Tensor] = []
@@ -793,6 +752,17 @@ class DRModel(L.LightningModule):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._use_freq_transform:
             x = self.freq_transform_layer(x)
+        if not self._channel_check_done:
+            actual = x.shape[1]
+            if actual != self._backbone_in_chans:
+                raise RuntimeError(
+                    f"Channel mismatch after freq_transform: got {actual} "
+                    f"channels but backbone was built with "
+                    f"in_chans={self._backbone_in_chans}. Check that the "
+                    f"frequency transform layer's `out_channels` matches the "
+                    f"value passed to ModelFactory."
+                )
+            self._channel_check_done = True
         return self.model(x)
 
     def _weighted_soft_target_cross_entropy(
@@ -837,10 +807,31 @@ class DRModel(L.LightningModule):
         else:
             loss = self.criterion(logits, y)
 
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        # on_epoch only: avoid emitting both train_loss_step and train_loss_epoch
+        # series to TensorBoard. The running epoch average is what we compare
+        # to val_loss anyway.
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     # ── Monte Carlo Dropout ───────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def tta_d4_predict(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Enumerated D4 TTA (without VFlip): 4 rotations × {identity, HFlip} = 8
+        forward passes. Returns the mean softmax probability tensor
+        `[B, num_classes]`. Averaging in probability space (not logit space)
+        matches standard practice.
+        """
+        probs = torch.zeros(x.size(0), self.num_classes, device=x.device)
+        n_views = 0
+        for k in self._tta_rotations:
+            rot = torch.rot90(x, k=k, dims=[-2, -1]) if k else x
+            for do_flip in self._tta_flip:
+                view = torch.flip(rot, dims=[-1]) if do_flip else rot
+                probs += torch.softmax(self(view), dim=1)
+                n_views += 1
+        return probs / n_views
 
     def mc_predict(
         self, x: torch.Tensor
@@ -880,7 +871,7 @@ class DRModel(L.LightningModule):
         preds = torch.argmax(probs, dim=1)
         self._val_metrics.update(preds, y)
         self._val_prob_metrics.update(probs, y)
-        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True,
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True,
                  sync_dist=True)
 
     def on_validation_epoch_end(self) -> None:
@@ -899,15 +890,11 @@ class DRModel(L.LightningModule):
             self.log("test_mc_entropy", entropy.mean(), on_step=False, on_epoch=True,
                      prog_bar=False, sync_dist=True)
         elif self.tta_enabled:
-            probs    = torch.zeros(x.size(0), self.num_classes, device=x.device)
-            avg_loss = 0.0
-            for _ in range(self.tta_runs):
-                aug    = self._tta_transform(x)
-                logits = self(aug)
-                probs += torch.softmax(logits, dim=1)
-                avg_loss += self.criterion(logits, y)
-            probs /= self.tta_runs
-            loss   = avg_loss / self.tta_runs
+            probs = self.tta_d4_predict(x)
+            # Loss computed once on the identity view so it stays comparable
+            # to non-TTA test_loss. Per-view loss averaging would mix
+            # orientations into a single scalar with no physical meaning.
+            loss = self.criterion(self(x), y)
         else:
             logits = self(x)
             loss   = self.criterion(logits, y)
@@ -973,9 +960,8 @@ class DRModel(L.LightningModule):
     # ── Optimiser ────────────────────────────────────────────────────────────
 
     def configure_optimizers(self):
-        # Layer-wise LR decay for ViT-family models
-        is_vit = self._model_name in _VIT_FAMILIES
-        if is_vit and self.layer_lr_decay < 1.0:
+        supports_layer_decay = self._model_name in _LAYER_DECAY_MODELS
+        if supports_layer_decay and self.layer_lr_decay < 1.0:
             try:
                 from timm.optim import param_groups_layer_decay
                 param_groups = param_groups_layer_decay(
@@ -983,11 +969,19 @@ class DRModel(L.LightningModule):
                     weight_decay=self.weight_decay,
                     layer_decay=self.layer_lr_decay,
                 )
-                optimizer = torch.optim.AdamW(
-                    param_groups, lr=self.learning_rate
+                optimizer = torch.optim.AdamW(param_groups, lr=self.learning_rate)
+                self.print(
+                    f"[layer-decay] {self._model_name}: "
+                    f"{len(param_groups)} param groups, layer_decay={self.layer_lr_decay}"
                 )
-            except Exception:
-                # Fallback if model doesn't support layer decay
+            except (AttributeError, NotImplementedError, KeyError, TypeError, ValueError) as e:
+                warnings.warn(
+                    f"[layer-decay] `{self._model_name}` is in _LAYER_DECAY_MODELS but "
+                    f"timm.param_groups_layer_decay raised {type(e).__name__}: {e}. "
+                    "Falling back to a flat AdamW. Remove the model from _LAYER_DECAY_MODELS "
+                    "or fix the backbone so this fallback is not silently hit.",
+                    stacklevel=2,
+                )
                 optimizer = torch.optim.AdamW(
                     self.parameters(),
                     lr=self.learning_rate,

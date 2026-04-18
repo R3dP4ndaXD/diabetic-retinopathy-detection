@@ -51,18 +51,22 @@ balancing_mode: "naive_oversample"   # "naive_oversample" | "sampler" | "weighte
 # ── Scheduler ────────────────────────────────────────────────────────────────
 use_scheduler: true
 scheduler_type: "warmup_cosine"   # "auto" | "warmup_cosine" | "plateau"
-scheduler_monitor: "val_loss"
-scheduler_monitor_mode: "min"
+scheduler_monitor: "val_kappa"
+scheduler_monitor_mode: "max"
 
 # ── Checkpointing & early stopping ───────────────────────────────────────────
+# All three track val_kappa so plateau scheduler, early stopping, and the
+# saved best checkpoint agree on the primary objective (quadratic kappa).
 checkpoint_monitor: "val_kappa"
 checkpoint_monitor_mode: "max"
-early_stopping_monitor: "val_loss"
-early_stopping_mode: "min"
+early_stopping_monitor: "val_kappa"
+early_stopping_mode: "max"
+early_stopping_patience: 10
 
 # ── TTA (test-time augmentation) ─────────────────────────────────────────────
+# When enabled, DRModel.tta_d4_predict averages 8 enumerated D4 views per
+# image at test time (4 rotations × {id, HFlip}, no vertical flip).
 tta_enabled: false
-tta_runs: 5
 
 # ── Frequency channel input: "none" | "wavelet" | "dct" | "fourier" | "fourier_hpf" ──
 freq_transform: "none"

@@ -18,14 +18,10 @@ Both streams use the RGB backbone's timm data_config for normalization by defaul
 """
 from __future__ import annotations
 
-import copy
 import random
 
 import lightning as L
 import torch
-import torch.nn.functional as F
-from pytorch_wavelets import DWTForward
-from sklearn.metrics import classification_report, cohen_kappa_score  # noqa: F401 (kept for compat)
 from timm.data import Mixup
 from torch import nn
 import torchmetrics
@@ -44,7 +40,6 @@ from src.model import (
     FocalLoss,
     FourierChannelTransform,
     FourierHighPassTransform,
-    SupConLoss,
     WaveletChannelTransform,
     log_test_results,
 )
@@ -103,11 +98,6 @@ class DualStreamDRModel(L.LightningModule):
         drop_rate: float = 0.3,
         drop_path_rate: float = 0.2,
         layer_lr_decay: float = 0.75,
-        # Supervised Contrastive Learning
-        use_supcon: bool = False,
-        supcon_weight: float = 0.2,
-        supcon_temperature: float = 0.07,
-        supcon_ordinal: bool = True,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "mixup_fn"])
@@ -124,8 +114,6 @@ class DualStreamDRModel(L.LightningModule):
         self.tta_runs = tta_runs
         self.mixup_fn = mixup_fn
         self.layer_lr_decay = layer_lr_decay
-        self.use_supcon = use_supcon
-        self.supcon_weight = supcon_weight
 
         # ── Frequency stream transform ────────────────────────────────────────
         _fs = freq_stream.lower()
@@ -182,23 +170,6 @@ class DualStreamDRModel(L.LightningModule):
             dropout=fusion_dropout,
             num_heads=fusion_num_heads,
         )
-
-        # ── Supervised Contrastive projection heads ───────────────────────────
-        if use_supcon:
-            self.proj_head_rgb = nn.Sequential(
-                nn.Linear(d_rgb, d_rgb), nn.ReLU(), nn.Linear(d_rgb, 128)
-            )
-            self.proj_head_wav = nn.Sequential(
-                nn.Linear(d_wav, d_wav), nn.ReLU(), nn.Linear(d_wav, 128)
-            )
-            self.supcon_criterion = SupConLoss(
-                temperature=supcon_temperature,
-                ordinal_weights=supcon_ordinal,
-            )
-        else:
-            self.proj_head_rgb = None
-            self.proj_head_wav = None
-            self.supcon_criterion = None
 
         # ── Loss ─────────────────────────────────────────────────────────────
         if loss_name == "focal":
@@ -265,30 +236,11 @@ class DualStreamDRModel(L.LightningModule):
 
     def training_step(self, batch):
         x, y = batch
-
-        # ── Supervised Contrastive auxiliary loss (free: uses existing views) ─
-        # f_rgb and f_wav are two complementary representations of the same
-        # image — no extra augmented pass needed.
-        f_rgb, f_wav = self._encode(x)
-        supcon_loss = torch.tensor(0.0, device=x.device)
-        if self.use_supcon and self.proj_head_rgb is not None:
-            z_rgb = self.proj_head_rgb(f_rgb)  # [B, 128]
-            z_wav = self.proj_head_wav(f_wav)  # [B, 128]
-            z = torch.stack([z_rgb, z_wav], dim=1)  # [B, 2, 128]
-            supcon_loss = self.supcon_criterion(z, y)
-
-        # ── Classification loss ───────────────────────────────────────────────
         if self.mixup_fn is not None:
             x, y = self.mixup_fn(x, y)
-            logits = self(x)
-        else:
-            logits = self.fusion_head(f_rgb, f_wav)  # reuse already-encoded features
-        ce_loss = self.criterion(logits, y)
-
-        loss = ce_loss + self.supcon_weight * supcon_loss
-        self.log("train_ce_loss",     ce_loss,     on_step=True, on_epoch=True, sync_dist=True)
-        self.log("train_supcon_loss", supcon_loss, on_step=True, on_epoch=True, sync_dist=True)
-        self.log("train_loss",        loss,        on_step=True, on_epoch=True, prog_bar=True,
+        logits = self(x)
+        loss = self.criterion(logits, y)
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True,
                  sync_dist=True)
         return loss
 
@@ -298,7 +250,7 @@ class DualStreamDRModel(L.LightningModule):
         loss = self.criterion(logits, y)
         preds = torch.argmax(logits, dim=1)
         self._val_metrics.update(preds, y)
-        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True,
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True,
                  sync_dist=True)
 
     def on_validation_epoch_end(self) -> None:
