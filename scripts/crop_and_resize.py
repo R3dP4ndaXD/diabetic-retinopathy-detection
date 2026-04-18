@@ -8,7 +8,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.concurrent_task_executor import concurrent_task_executor
-from src.utils import compute_laplacian_variance, preprocess_image, track_files
+from src.utils import preprocess_image, track_files
 
 from typing import NamedTuple, Tuple
 
@@ -41,29 +41,6 @@ parser.add_argument(
     help="Skip files that already exist in destination.",
 )
 parser.add_argument(
-    "--filter-blurry",
-    action="store_true",
-    help="Filter out blurry/corrupted images using the Laplacian variance.",
-)
-parser.add_argument(
-    "--laplacian-low",
-    type=float,
-    default=10.0,
-    help="Minimum Laplacian variance — images below this are too blurry.",
-)
-parser.add_argument(
-    "--laplacian-high",
-    type=float,
-    default=10000.0,
-    help="Maximum Laplacian variance — images above this are likely corrupted.",
-)
-parser.add_argument(
-    "--filtered-log",
-    type=str,
-    default="",
-    help="Path to write filtered-out image paths (one per line).",
-)
-parser.add_argument(
     "--clahe-clip-limit",
     type=float,
     default=2.0,
@@ -90,27 +67,12 @@ class FileInfo(NamedTuple):
     dest: str
     size: Tuple[int, int]  # (width, height) tuple.
     threshold: int
-    filter_blurry: bool
-    laplacian_low: float
-    laplacian_high: float
     clahe_clip_limit: float
     clahe_tile_grid: Tuple[int, int]
     sigmaX: float = 10.0
 
-
-# Shared list for filtered-out paths (written at the end, not per-worker)[cite: 3]
-_filtered_out: list[str] = []
-
-
 def preprocess_and_save(file_info: FileInfo):
     try:
-        # Laplacian quality filter (on the raw source image)[cite: 3]
-        if file_info.filter_blurry:
-            variance = compute_laplacian_variance(file_info.src)
-            if variance < file_info.laplacian_low or variance > file_info.laplacian_high:
-                _filtered_out.append(file_info.src)
-                return
-
         # Added threshold parameter to match the updated pipeline
         result = preprocess_image(
             file_info.src,
@@ -148,9 +110,6 @@ if __name__ == "__main__":
                 dest=dest_path,
                 size=size,
                 threshold=args.threshold,
-                filter_blurry=args.filter_blurry,
-                laplacian_low=args.laplacian_low,
-                laplacian_high=args.laplacian_high,
                 clahe_clip_limit=args.clahe_clip_limit,
                 clahe_tile_grid=tuple(args.clahe_tile_grid),
                 sigmaX=args.sigmaX,
@@ -161,20 +120,10 @@ if __name__ == "__main__":
         files = [file_info for file_info in files if not os.path.exists(file_info.dest)]
 
     print(f"Processing {len(files)} images with {args.workers} workers...")
-    if args.filter_blurry:
-        print(f"Laplacian filter enabled: keeping variance in [{args.laplacian_low}, {args.laplacian_high}]")
 
-    results = concurrent_task_executor(
+    concurrent_task_executor(
         preprocess_and_save,
         files,
         max_workers=args.workers,
         description="Processing images",
     )
-    _filtered_out = [res for res in results if res is not None]
-
-    if args.filter_blurry and _filtered_out:
-        print(f"Filtered out {len(_filtered_out)} images")
-        if args.filtered_log:
-            with open(args.filtered_log, "w") as f:
-                f.write("\n".join(_filtered_out) + "\n")
-            print(f"Wrote filtered paths to {args.filtered_log}")

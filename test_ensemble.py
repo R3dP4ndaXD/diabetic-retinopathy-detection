@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import csv
 from os.path import basename
@@ -13,10 +15,20 @@ from sklearn.metrics import (
     recall_score,
 )
 import torch
+import torch.nn as nn
 
 from src.data_module import DRDataModule
 from src.model import DRModel
 from src.models.factory import get_recommended_input_size, get_supported_model_input_sizes
+
+_DROPOUT_TYPES = (
+    nn.Dropout,
+    nn.Dropout1d,
+    nn.Dropout2d,
+    nn.Dropout3d,
+    nn.AlphaDropout,
+    nn.FeatureAlphaDropout,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,6 +110,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to save per-image predictions CSV.",
     )
     parser.add_argument(
+        "--save-probs",
+        action="store_true",
+        help="When --predictions-csv is set, also save per-class probability columns.",
+    )
+    parser.add_argument(
         "--tta",
         action="store_true",
         help="Enable test-time augmentation (average predictions over multiple augmented views).",
@@ -107,6 +124,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help="Number of augmented views per image when TTA is enabled.",
+    )
+    parser.add_argument(
+        "--mc-dropout",
+        action="store_true",
+        help="Enable Monte Carlo Dropout uncertainty estimation for each ensemble member.",
+    )
+    parser.add_argument(
+        "--mc-dropout-runs",
+        type=int,
+        default=20,
+        help="Number of stochastic passes per image for each ensemble member.",
     )
     parser.add_argument(
         "--list-model-input-sizes",
@@ -141,30 +169,54 @@ def _build_eval_datamodule(csv_path: Path, image_size: int, args: argparse.Names
     return dm
 
 
+def _enable_dropout_only(model: nn.Module) -> None:
+    model.eval()
+    for module in model.modules():
+        if isinstance(module, _DROPOUT_TYPES):
+            module.train()
+
+
 def _collect_member_probabilities(
     checkpoint_paths: list[Path],
     image_sizes: list[int],
     csv_path: Path,
     tta: bool,
     tta_runs: int,
+    mc_dropout: bool,
+    mc_dropout_runs: int,
     device: torch.device,
     args: argparse.Namespace,
 ):
     all_member_probs = []
+    all_member_variance = []
     y_true_ref = None
 
     for checkpoint_path, image_size in zip(checkpoint_paths, image_sizes):
         dm = _build_eval_datamodule(csv_path, image_size, args)
         model = DRModel.load_from_checkpoint(str(checkpoint_path)).to(device)
-        model.eval()
+
+        if mc_dropout:
+            _enable_dropout_only(model)
+        else:
+            model.eval()
 
         probs_batches = []
         labels_batches = []
+        variance_batches = []
 
         with torch.inference_mode():
             for images, labels in dm.test_dataloader():
                 images = images.to(device)
-                if tta:
+                if mc_dropout:
+                    probs_runs = []
+                    for _ in range(mc_dropout_runs):
+                        logits = model(images)
+                        probs_runs.append(torch.softmax(logits, dim=1))
+                    stacked = torch.stack(probs_runs, dim=0)  # [R, B, C]
+                    probs = stacked.mean(dim=0)
+                    variance_mean = stacked.var(dim=0, unbiased=False).mean(dim=1)
+                    variance_batches.append(variance_mean.cpu())
+                elif tta:
                     avg_probs = torch.zeros(images.size(0), model.num_classes, device=device)
                     for _ in range(tta_runs):
                         augmented = model._tta_transform(images)
@@ -187,8 +239,13 @@ def _collect_member_probabilities(
             raise RuntimeError("Validation labels mismatch across ensemble members.")
 
         all_member_probs.append(member_probs)
+        if mc_dropout:
+            all_member_variance.append(torch.cat(variance_batches, dim=0))
 
-    return torch.stack(all_member_probs, dim=0), y_true_ref
+    member_probs = torch.stack(all_member_probs, dim=0)
+    member_variance = torch.stack(all_member_variance, dim=0) if mc_dropout else None
+
+    return member_probs, y_true_ref, member_variance
 
 
 def _infer_model_name_from_checkpoint(checkpoint_path: Path) -> str | None:
@@ -272,6 +329,9 @@ def main() -> None:
             print(f"  {model_name}: {mapping[model_name]}")
         return
 
+    if args.mc_dropout and args.tta:
+        raise ValueError("Use either --tta or --mc-dropout, not both at the same time.")
+
     test_csv_path = Path(_resolve_csv_path(args.test_csv))
     val_csv_path = Path(_resolve_csv_path(args.val_csv))
 
@@ -305,16 +365,20 @@ def main() -> None:
 
     if args.tta:
         print(f"TTA enabled with {args.tta_runs} augmented views per image")
+    if args.mc_dropout:
+        print(f"MC Dropout enabled with {args.mc_dropout_runs} stochastic passes per member")
 
     if args.tune_ensemble_weights:
         print("Tuning ensemble weights on validation set...")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        member_probs, y_true_val = _collect_member_probabilities(
+        member_probs, y_true_val, _ = _collect_member_probabilities(
             checkpoint_paths=checkpoint_paths,
             image_sizes=member_image_sizes,
             csv_path=val_csv_path,
             tta=args.tta,
             tta_runs=args.tta_runs,
+            mc_dropout=args.mc_dropout,
+            mc_dropout_runs=args.mc_dropout_runs,
             device=device,
             args=args,
         )
@@ -329,12 +393,14 @@ def main() -> None:
         print(f"Best validation quadratic kappa: {best_val_kappa:.6f}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    member_probs_test, y_true_test = _collect_member_probabilities(
+    member_probs_test, y_true_test, member_variance_test = _collect_member_probabilities(
         checkpoint_paths=checkpoint_paths,
         image_sizes=member_image_sizes,
         csv_path=test_csv_path,
         tta=args.tta,
         tta_runs=args.tta_runs,
+        mc_dropout=args.mc_dropout,
+        mc_dropout_runs=args.mc_dropout_runs,
         device=device,
         args=args,
     )
@@ -348,11 +414,6 @@ def main() -> None:
     ensemble_probs_test = np.tensordot(weights, member_probs_test.numpy(), axes=(0, 0))
     y_pred_all = ensemble_probs_test.argmax(axis=1).tolist()
     y_true_all = y_true_test.numpy().tolist()
-    all_rows = []
-
-    if args.predictions_csv:
-        for pred, label in zip(y_pred_all, y_true_all):
-            all_rows.append({"label": label, "prediction": pred})
 
     acc = accuracy_score(y_true_all, y_pred_all)
     kappa = cohen_kappa_score(y_true_all, y_pred_all, weights="quadratic")
@@ -395,8 +456,45 @@ def main() -> None:
     if args.predictions_csv:
         predictions_path = Path(args.predictions_csv)
         predictions_path.parent.mkdir(parents=True, exist_ok=True)
+
+        confidence = np.max(ensemble_probs_test, axis=1)
+        entropy = -(ensemble_probs_test * np.log(np.clip(ensemble_probs_test, 1e-8, 1.0))).sum(axis=1)
+        disagreement = ensemble_probs_test.var(axis=1).mean(axis=1)
+
+        mc_variance = None
+        if member_variance_test is not None:
+            mc_variance = np.tensordot(weights, member_variance_test.numpy(), axes=(0, 0))
+
+        all_rows = []
+        for i, (pred, label) in enumerate(zip(y_pred_all, y_true_all)):
+            row = {
+                "label": int(label),
+                "prediction": int(pred),
+                "confidence": float(confidence[i]),
+                "uncertainty_entropy": float(entropy[i]),
+                "uncertainty_member_disagreement": float(disagreement[i]),
+            }
+            if mc_variance is not None:
+                row["uncertainty_mc_variance_mean"] = float(mc_variance[i])
+            if args.save_probs:
+                for c in range(ensemble_probs_test.shape[1]):
+                    row[f"prob_{c}"] = float(ensemble_probs_test[i, c])
+            all_rows.append(row)
+
+        fieldnames = [
+            "label",
+            "prediction",
+            "confidence",
+            "uncertainty_entropy",
+            "uncertainty_member_disagreement",
+        ]
+        if mc_variance is not None:
+            fieldnames.append("uncertainty_mc_variance_mean")
+        if args.save_probs:
+            fieldnames.extend([f"prob_{c}" for c in range(ensemble_probs_test.shape[1])])
+
         with predictions_path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["label", "prediction"])
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(all_rows)
         print(f"Saved per-image predictions to {predictions_path}")

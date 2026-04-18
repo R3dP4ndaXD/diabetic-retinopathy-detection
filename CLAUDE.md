@@ -32,6 +32,16 @@ python train_meta.py \
   --val-csv data/.../val.csv --test-csv data/.../test.csv \
   --fusion-type mlp
 
+# OOF cross-validation (produces oof_predictions.csv + per-fold checkpoints)
+# Uses conf/config.yaml; add oof_num_folds=5 or override via Hydra
+python train_oof.py model_name=convnext_base oof_num_folds=5
+
+# XGBoost meta-learner from OOF probability CSVs (one CSV per base model)
+python train_meta_xgb.py \
+  --oof-csvs artifacts/oof/run1/oof_predictions.csv artifacts/oof/run2/oof_predictions.csv \
+  --test-prob-csvs artifacts/oof/run1/test_predictions.csv artifacts/oof/run2/test_predictions.csv \
+  --output-dir artifacts/meta_xgb
+
 # Evaluate a single checkpoint
 python test.py --checkpoint artifacts/checkpoints/<run_id>/epoch=N-....ckpt
 
@@ -41,21 +51,30 @@ python test_ensemble.py \
   --tune-ensemble-weights \
   --val-csv data/.../val.csv --test-csv data/.../test.csv
 
-# Preprocessing: crop & resize raw images locally
+# Preprocessing: crop & resize raw images locally (run for both train and test)
 python scripts/crop_and_resize.py \
   --src data/.../train --dest data/.../resized/train \
   --workers 4 --skip-existing --sigmaX 10
+python scripts/crop_and_resize.py \
+  --src data/.../test --dest data/.../resized/test \
+  --workers 4 --skip-existing --sigmaX 10
 
-# Generate train/val/test CSV splits
+# Generate train/val/test CSV splits using the official test labels
 python scripts/split_dataset.py \
-  --data_dir data/.../resized/train --csv_path data/trainLabels.csv \
-  --train_csv_path data/.../train.csv --val_csv_path data/.../val.csv --test_csv_path data/.../test.csv
+  --data-dir data/.../resized/train \
+  --csv-path data/trainLabels.csv \
+  --test-labels-csv data/testLabels.csv \
+  --test-data-dir data/.../resized/test \
+  --train-csv-path data/.../train.csv \
+  --val-csv-path data/.../val.csv \
+  --test-csv-path data/.../test.csv
+# Add --test-usage Public or --test-usage Private to filter the test set by Usage column
 ```
 
 ### Cluster (Slurm + Apptainer)
 
 ```bash
-# Build container (one-time, local) — CUDA 12.4 + PyTorch 2.3.1
+# Build container (one-time, local) — CUDA 12.8 + PyTorch 2.9.1
 ./scripts/build_apptainer_local.sh
 
 # Sync to cluster
@@ -63,7 +82,7 @@ python scripts/split_dataset.py \
 
 # Single-model training (up to 3 H100s)
 NUM_GPUS=3 \
-APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu124.sif \
+APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu128.sif \
 DATASET_DIR=~/diabetic-retinopathy-detection/data/... \
 ./scripts/submit_slurm_apptainer.sh model_name=convnext_base image_size=224 batch_size=128
 
@@ -72,10 +91,19 @@ NUM_GPUS=2 APPTAINER_IMAGE=... DATASET_DIR=... \
 ./scripts/submit_slurm_train_dual_stream.sh \
   rgb_model_name=convnext_base wav_model_name=efficientnet_b0 fusion_type=mlp
 
+# OOF cross-validation
+APPTAINER_IMAGE=... DATASET_DIR=... \
+./scripts/submit_slurm_train_oof.sh model_name=convnext_base oof_num_folds=5
+
 # Meta-learner training (1 GPU, fast)
 APPTAINER_IMAGE=... DATASET_DIR=... \
 ./scripts/submit_slurm_train_meta.sh \
   --base-checkpoints ckpt1.ckpt ckpt2.ckpt --val-csv data/.../val.csv --fusion-type mlp
+
+# XGBoost meta-learner on OOF CSVs
+APPTAINER_IMAGE=... DATASET_DIR=... \
+./scripts/submit_slurm_train_meta_xgb.sh \
+  --oof-csvs oof1.csv oof2.csv --test-prob-csvs test1.csv test2.csv
 
 # Ensemble test
 APPTAINER_IMAGE=... DATASET_DIR=... \
@@ -113,6 +141,20 @@ train_dual_stream.py  (Hydra, conf/config_dual_stream.yaml)
             "cross_attention" → CrossAttentionFusionHead (RGB queries wav)
 ```
 
+### OOF cross-validation pipeline
+
+```
+train_oof.py  (Hydra, conf/config.yaml)
+  ├─ StratifiedKFold over oof_source_csv_path
+  ├─ Per fold: DRDataModule + DRModel (same as single-stream)
+  └─ Outputs to artifacts/oof/<run_id>/
+       ├─ fold_N/checkpoints/        best checkpoint per fold
+       ├─ oof_predictions.csv        prob_0..4, pred_label, fold per sample
+       └─ test_predictions.csv       mean probs over all fold models
+```
+
+OOF predictions feed directly into `train_meta_xgb.py`.
+
 ### Meta-learner ensemble pipeline
 
 ```
@@ -124,7 +166,28 @@ train_meta.py  (argparse)
          "learned_weights" → softmax-normalised scalar weights
          "mlp"             → flatten → 2-layer MLP
          "cross_attention" → per-model token → self-attention → pool → head
+
+train_meta_xgb.py  (argparse)
+  ├─ OOF CSV per base model (from train_oof.py outputs)
+  ├─ XGBoost with fold-aware OOF CV evaluation
+  └─ Outputs to artifacts/meta_xgb/<run_id>/
+       ├─ meta_xgb_model.json        final model trained on all OOF data
+       ├─ meta_oof_predictions.csv   CV meta predictions
+       └─ metrics.json               OOF/test QWK, fold scores
 ```
+
+### Key source modules
+
+| File | Role |
+|---|---|
+| `src/models/factory.py` | `TimmModel`, `TIMM_MODEL_REGISTRY`, normalization helpers |
+| `src/model.py` | `DRModel` LightningModule + `EMACallback` |
+| `src/dual_stream_model.py` | `DualStreamDRModel` LightningModule |
+| `src/fusion.py` | `MLPFusionHead`, `CrossAttentionFusionHead` |
+| `src/ensemble.py` | `EnsemblePredictor` (inference-only soft voting) |
+| `src/ensemble_meta.py` | `MetaLearner` LightningModule (temperature / weights / MLP / cross-attention) |
+| `src/data_module.py` | `DRDataModule`; dataset, augmentation, class balancing |
+| `src/config_checks.py` | `validate_training_recipe` — raises on hard conflicts (e.g. MC Dropout + drop_rate=0), warns on soft ones (MixUp + Focal) |
 
 ### Key config options
 
@@ -134,12 +197,16 @@ train_meta.py  (argparse)
 |---|---|---|
 | `model_name` | see `TIMM_MODEL_REGISTRY` in `factory.py` | e.g. `convnext_base`, `efficientnetv2_m`, `vit_base` |
 | `normalization_mode` | `timm` \| `imagenet` \| `dataset_by_size` \ | `timm` reads per-model stats automatically |
-| `balancing_mode` | `naive_oversample` \| `sampler` \| `weighted_loss` | |
+| `balancing_mode` | `naive_oversample` \| `sampler` \| `weighted_loss` \| `smote` | `smote` requires pre-generated SMOTE images via `scripts/generate_smote_images.py` |
 | `loss_name` | `cross_entropy` \| `focal` | |
 | `use_mixup` | `true` \| `false` | MixUp + CutMix via timm |
 | `use_ema` | `true` \| `false` | EMA weights used at val/test |
 | `num_gpus` | `1`–`3` | DDP activated automatically when > 1 |
 | `drop_path_rate` | `0.0`–`0.4` | stochastic depth; key for ViTs/ConvNeXt |
+| `freq_transform` | `none` \| `wavelet` \| `dct` \| `fourier` \| `fourier_hpf` | appends frequency channels to RGB input in single-stream model |
+| `tta_enabled` | `true` \| `false` | test-time augmentation at inference |
+| `mc_dropout_enabled` | `true` \| `false` | MC Dropout uncertainty at test time; requires `drop_rate > 0` |
+| `layer_lr_decay` | `0.5`–`1.0` | layer-wise LR decay for ViT families |
 
 **`conf/config_dual_stream.yaml`** adds: `rgb_model_name`, `wav_model_name`, `fusion_type`, `wavelet_name` (`sym2` default), `wavelet_levels` (2 default), `fusion_hidden`, `fusion_num_heads`.
 
@@ -164,10 +231,23 @@ Supported models (call `from src.models.factory import list_supported_models`):
 
 Primary: `val_kappa` (quadratic weighted Cohen's kappa). Also logged: `acc`, `precision`, `recall`, `f1`. Full per-class report printed and logged to TensorBoard at end of test.
 
+### Output directories
+
+| Path | Contents |
+|---|---|
+| `artifacts/checkpoints/<run_id>/` | single-stream and dual-stream checkpoints |
+| `artifacts/oof/<run_id>/` | OOF fold checkpoints + `oof_predictions.csv` |
+| `artifacts/meta_xgb/<run_id>/` | XGBoost model JSON + metrics |
+| `logs/` | TensorBoard event files |
+| `slurm/` | Slurm stdout/stderr |
+
 ## Important notes
 
 - `normalization_mode='timm'` requires the model to be instantiated before the DataModule so the data_config can be read. `train.py` and `train_dual_stream.py` handle this order.
 - `dataset_by_size` normalization only supports `image_size` 224 or 260. For other sizes use `imagenet`.
 - EMA: the EMACallback swaps to EMA weights before every validation and test epoch, then restores live weights. Checkpoints therefore always save the *live* weights; apply EMA manually if needed at inference.
 - DDP (`num_gpus > 1`): `sync_dist=True` is set on all `.log()` calls. The `strategy` is `ddp_find_unused_parameters_false` for efficiency.
-- The container now targets CUDA 12.4 + PyTorch 2.3.1 (`container/apptainer.def`). Rebuild the `.sif` before running on H100s if you haven't already.
+- The container targets CUDA 12.8 + PyTorch 2.9.1 (`container/apptainer.def`). Rebuild the `.sif` before running on H100s if you haven't already.
+- `src/config_checks.py:validate_training_recipe` is called at the start of `train.py`, `train_dual_stream.py`, and `train_oof.py`. It raises `ValueError` for hard incompatibilities (e.g. `mc_dropout_enabled=true` with `drop_rate=0`) and emits warnings for soft conflicts (e.g. MixUp + FocalLoss). Set `strict_compatibility_checks=false` to downgrade errors to warnings.
+- `freq_transform` in single-stream (`none`/`wavelet`/`dct`/`fourier`/`fourier_hpf`) appends extra channels to the 3-channel RGB input inside the model. The DataModule always delivers 3-channel images; channel expansion happens in `DRModel.forward`.
+- OOF output CSVs (`oof_predictions.csv`, `test_predictions.csv`) are the direct inputs to `train_meta_xgb.py`. Column format: `image_path`, `label`, `fold`, `prob_0`…`prob_4`, `pred_label`.

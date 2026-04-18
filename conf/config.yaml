@@ -1,7 +1,7 @@
 # ── Data ─────────────────────────────────────────────────────────────────────
-train_csv_path: data/diabetic-retinopathy-dataset/train.csv
-val_csv_path:   data/diabetic-retinopathy-dataset/val.csv
-test_csv_path:  data/diabetic-retinopathy-dataset/test.csv
+train_csv_path: /data/train.csv
+val_csv_path:   /data/val.csv
+test_csv_path:  /data/test.csv
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
 seed: 42
@@ -10,19 +10,17 @@ seed: 42
 num_workers: 8
 logs_dir: logs
 checkpoint_dirpath: artifacts/checkpoints
-run_tag: "${model_name}_${balancing_mode}_fourier_shift"
+run_tag: ""   # optional suffix appended to the auto-generated tag (e.g. "exp1")
 
 # ── Model ────────────────────────────────────────────────────────────────────
 model_name: "efficientnet_b2"   # See src/models/factory.py TIMM_MODEL_REGISTRY
-model_source: "timm"          # kept for reference; factory is now always timm
 drop_rate: 0.3
 drop_path_rate: 0.2           # stochastic depth (ViTs and ConvNeXt benefit most)
 layer_lr_decay: 0.75          # layer-wise LR decay ratio (ViT families only)
 freeze_backbone: false
 
 # ── Image & normalisation ────────────────────────────────────────────────────
-image_size: 260
-normalization_mode: "timm"    # "timm" | "imagenet" | "dataset_by_size"
+image_size: null   # null → use model's recommended size (see TIMM_MODEL_REGISTRY)
 
 # ── Training recipe ──────────────────────────────────────────────────────────
 batch_size: 128
@@ -32,10 +30,6 @@ max_epochs: 50
 precision: "bf16-mixed"
 gradient_clip_val: 1.0
 warmup_epochs: 4
-
-# ── EMA ──────────────────────────────────────────────────────────────────────
-use_ema: false
-ema_decay: 0.9998
 
 # ── Loss ─────────────────────────────────────────────────────────────────────
 loss_name: "cross_entropy"    # "cross_entropy" | "focal"
@@ -48,11 +42,15 @@ mixup_alpha: 0.4
 cutmix_alpha: 1.0
 mixup_prob: 0.5
 
+# ── Recipe checks (avoid conflicting techniques) ────────────────────────────
+strict_compatibility_checks: true
+
 # ── Class balancing ───────────────────────────────────────────────────────────
-balancing_mode: "naive_oversample"   # "naive_oversample" | "sampler" | "balanced_batch" | "weighted_loss" | "smote"
+balancing_mode: "naive_oversample"   # "naive_oversample" | "sampler" | "weighted_loss" | "smote"
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 use_scheduler: true
+scheduler_type: "warmup_cosine"   # "auto" | "warmup_cosine" | "plateau"
 scheduler_monitor: "val_loss"
 scheduler_monitor_mode: "min"
 
@@ -67,31 +65,32 @@ tta_enabled: false
 tta_runs: 5
 
 # ── Frequency channel input: "none" | "wavelet" | "dct" | "fourier" | "fourier_hpf" ──
-freq_transform: "fourier"
+freq_transform: "none"
+
 # wavelet options (freq_transform: "wavelet")
 wavelet_name: "haar"
 wavelet_mode: "symmetric"
 wavelet_levels: 1
 wavelet_include_lowpass_channel: true
+
 # dct options (freq_transform: "dct")
 dct_block_size: 8        # block side length (8 = JPEG standard)
 dct_num_coeffs: 6        # zigzag-ordered coefficients to keep per block
+
 # fourier options (freq_transform: "fourier")
-#   3 k-space channels: sign(Re)*log1p|Re|, sign(Im)*log1p|Im|, log1p|F|
-#   Adapted from MRIQA (ICME 2024). shift=true puts DC at centre (more interpretable).
 fourier_shift: true
 # fourier_hpf options (freq_transform: "fourier_hpf")
-#   FFT → zero-out low-freq circle → IFFT → pixel-space edges/vessels
-#   lpf_radius: fraction of min(H,W) to remove around DC (0.05–0.25)
-#   grayscale: true → 1 output channel; false → 3 per-channel outputs
 fourier_hpf_radius: 0.1
-fourier_hpf_grayscale: false
 
-# ── Supervised Contrastive Learning ──────────────────────────────────────────
-use_supcon: false              # auxiliary SupCon loss (incompatible with use_mixup=true)
-supcon_weight: 0.2             # loss = CE + supcon_weight * SupCon
-supcon_temperature: 0.07       # lower = harder negatives
-supcon_ordinal: false           # weight negatives by |grade_i - grade_j|
+# ── Monte Carlo Dropout (uncertainty quantification at test time) ─────────────
+mc_dropout_enabled: false      # run N stochastic forward passes at test time
+mc_dropout_samples: 50         # number of MC passes (50 is standard in literature)
 
 # ── Multi-GPU (DDP) ──────────────────────────────────────────────────────────
 num_gpus: 1   # 1–3 for cluster
+
+# ── OOF training ─────────────────────────────────────────────────────────────
+oof_source_csv_path: /data/train.csv  # null -> train_csv_path
+oof_num_folds: 5
+oof_seed: 42
+oof_output_dir: artifacts/oof

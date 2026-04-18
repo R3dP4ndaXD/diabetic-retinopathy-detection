@@ -28,13 +28,19 @@ from pytorch_wavelets import DWTForward
 from sklearn.metrics import classification_report, cohen_kappa_score  # noqa: F401 (kept for compat)
 from timm.data import Mixup
 from torch import nn
-from torchmetrics.functional import accuracy, cohen_kappa, f1_score, precision, recall
+import torchmetrics
+from torchmetrics.classification import (
+    MulticlassAccuracy,
+    MulticlassCohenKappa,
+    MulticlassF1Score,
+    MulticlassPrecision,
+    MulticlassRecall,
+)
 from torchvision.transforms import v2 as T
 
 from src.fusion import build_fusion_head
 from src.model import (
     DCTChannelTransform,
-    EMACallback,
     FocalLoss,
     FourierChannelTransform,
     FourierHighPassTransform,
@@ -57,7 +63,6 @@ class DualStreamDRModel(L.LightningModule):
     wavelet_levels   : DWT decomposition levels J (freq_stream="wavelet")
     fourier_shift    : fftshift DC to centre (freq_stream="fourier")
     fourier_hpf_radius   : low-freq cutoff radius as fraction of min(H,W)
-    fourier_hpf_grayscale: grayscale HPF output (1 ch) vs per-channel (3 ch)
     mixup_fn         : timm Mixup instance injected from DRDataModule
     """
 
@@ -73,6 +78,7 @@ class DualStreamDRModel(L.LightningModule):
         learning_rate: float = 4e-5,
         weight_decay: float = 1e-4,
         use_scheduler: bool = True,
+        scheduler_type: str = "auto",
         freeze_backbone: bool = False,
         class_weights=None,
         label_smoothing: float = 0.0,
@@ -93,7 +99,6 @@ class DualStreamDRModel(L.LightningModule):
         dct_num_coeffs: int = 6,
         fourier_shift: bool = False,
         fourier_hpf_radius: float = 0.1,
-        fourier_hpf_grayscale: bool = False,
         mixup_fn: Mixup | None = None,
         drop_rate: float = 0.3,
         drop_path_rate: float = 0.2,
@@ -111,6 +116,7 @@ class DualStreamDRModel(L.LightningModule):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.use_scheduler = use_scheduler
+        self.scheduler_type = scheduler_type
         self.warmup_epochs = warmup_epochs
         self.scheduler_monitor = scheduler_monitor
         self.scheduler_monitor_mode = scheduler_monitor_mode
@@ -133,7 +139,6 @@ class DualStreamDRModel(L.LightningModule):
         elif _fs == "fourier_hpf":
             self.freq_transform = FourierHighPassTransform(
                 lpf_radius=fourier_hpf_radius,
-                grayscale=fourier_hpf_grayscale,
             )
         else:  # "wavelet" (default)
             self.freq_transform = WaveletChannelTransform(
@@ -219,6 +224,17 @@ class DualStreamDRModel(L.LightningModule):
         self._test_targets: list[torch.Tensor] = []
         self._rgb_model_name = rgb_model_name
 
+        # ── Epoch-level metrics (stateful — accumulate full confusion matrix) ──────
+        _mc = dict(num_classes=num_classes)
+        self._val_metrics = torchmetrics.MetricCollection({
+            "acc":       MulticlassAccuracy(**_mc),
+            "kappa":     MulticlassCohenKappa(**_mc, weights="quadratic"),
+            "f1":        MulticlassF1Score(**_mc, average="macro"),
+            "precision": MulticlassPrecision(**_mc, average="macro"),
+            "recall":    MulticlassRecall(**_mc, average="macro"),
+        }, prefix="val_")
+        self._test_metrics = self._val_metrics.clone(prefix="test_")
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -276,27 +292,21 @@ class DualStreamDRModel(L.LightningModule):
                  sync_dist=True)
         return loss
 
-    def _compute_metrics(self, preds: torch.Tensor, y: torch.Tensor) -> dict:
-        kwargs = dict(task="multiclass", num_classes=self.num_classes)
-        return {
-            "acc":       accuracy(preds, y, **kwargs),
-            "kappa":     cohen_kappa(preds, y, **kwargs, weights="quadratic"),
-            "precision": precision(preds, y, **kwargs, average="macro"),
-            "recall":    recall(preds, y, **kwargs, average="macro"),
-            "f1":        f1_score(preds, y, **kwargs, average="macro"),
-        }
-
     def validation_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
         loss = self.criterion(logits, y)
         preds = torch.argmax(logits, dim=1)
-        metrics = self._compute_metrics(preds, y)
+        self._val_metrics.update(preds, y)
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True,
                  sync_dist=True)
+
+    def on_validation_epoch_end(self) -> None:
+        metrics = self._val_metrics.compute()
+        self._val_metrics.reset()
+        prog_bar_keys = {"val_kappa", "val_acc", "val_f1"}
         for name, value in metrics.items():
-            self.log(f"val_{name}", value, on_step=True, on_epoch=True,
-                     prog_bar=(name in ("acc", "kappa")), sync_dist=True)
+            self.log(name, value, prog_bar=(name in prog_bar_keys), sync_dist=True)
 
     def test_step(self, batch, batch_idx):
         x, y = batch
@@ -317,12 +327,9 @@ class DualStreamDRModel(L.LightningModule):
             loss   = self.criterion(logits, y)
             preds  = torch.argmax(logits, dim=1)
 
-        metrics = self._compute_metrics(preds, y)
+        self._test_metrics.update(preds, y)
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True,
                  sync_dist=True)
-        for name, value in metrics.items():
-            self.log(f"test_{name}", value, on_step=False, on_epoch=True,
-                     prog_bar=True, sync_dist=True)
 
         self._test_preds.append(preds.detach().cpu())
         self._test_targets.append(y.detach().cpu())
@@ -332,6 +339,10 @@ class DualStreamDRModel(L.LightningModule):
         self._test_targets = []
 
     def on_test_epoch_end(self) -> None:
+        metrics = self._test_metrics.compute()
+        self._test_metrics.reset()
+        for name, value in metrics.items():
+            self.log(name, value, prog_bar=True, sync_dist=True)
         if not self._test_preds:
             return
         y_pred = torch.cat(self._test_preds).numpy()
@@ -349,36 +360,50 @@ class DualStreamDRModel(L.LightningModule):
 
         configuration: dict = {"optimizer": optimizer, "monitor": self.scheduler_monitor}
 
-        if self.use_scheduler:
-            if self.warmup_epochs > 0:
-                cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer,
-                    T_max=max(1, self.trainer.max_epochs - self.warmup_epochs),
-                )
-                warmup = torch.optim.lr_scheduler.LinearLR(
-                    optimizer, start_factor=1e-2, total_iters=self.warmup_epochs
-                )
-                scheduler = torch.optim.lr_scheduler.SequentialLR(
-                    optimizer,
-                    schedulers=[warmup, cosine],
-                    milestones=[self.warmup_epochs],
-                )
-                configuration["lr_scheduler"] = {
-                    "scheduler": scheduler,
-                    "interval": "epoch",
-                    "frequency": 1,
-                }
-            else:
-                reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer,
-                    mode=self.scheduler_monitor_mode,
-                    factor=0.3,
-                    patience=2,
-                    threshold=0.001,
-                )
-                configuration["lr_scheduler"] = {
-                    "scheduler": reduce_lr,
-                    "monitor": self.scheduler_monitor,
-                }
+        if not self.use_scheduler:
+            return configuration
+
+        scheduler_type = str(self.scheduler_type).lower()
+        if scheduler_type == "auto":
+            scheduler_type = "warmup_cosine" if self.warmup_epochs > 0 else "plateau"
+
+        if scheduler_type in {"warmup_cosine", "cosine_warmup"}:
+            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=max(1, self.trainer.max_epochs - self.warmup_epochs),
+            )
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=1e-2, total_iters=self.warmup_epochs
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup, cosine],
+                milestones=[self.warmup_epochs],
+            )
+            configuration["lr_scheduler"] = {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            }
+
+        elif scheduler_type in {"plateau", "reduce_on_plateau"}:
+            reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode=self.scheduler_monitor_mode,
+                factor=0.5,
+                patience=5,
+                threshold=1e-3,
+                min_lr=1e-7,
+            )
+            configuration["lr_scheduler"] = {
+                "scheduler": reduce_lr,
+                "monitor": self.scheduler_monitor,
+            }
+
+        else:
+            raise ValueError(
+                f"Unsupported scheduler_type '{self.scheduler_type}'. "
+                "Expected: auto, warmup_cosine, plateau."
+            )
 
         return configuration

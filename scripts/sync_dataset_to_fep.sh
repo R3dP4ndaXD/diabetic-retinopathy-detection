@@ -7,18 +7,20 @@ REMOTE_DATASET_DIR="${REMOTE_DATASET_DIR:-~/diabetic-retinopathy-detection/data/
 LOCAL_DATASET_DIR="${LOCAL_DATASET_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/data/diabetic-retinopathy-dataset}"
 
 RESIZED_DIR="${LOCAL_DATASET_DIR}/resized"
-LABELS_CSV="${LOCAL_DATASET_DIR}/trainLabels.csv"
+TRAIN_LABELS_CSV="${LOCAL_DATASET_DIR}/trainLabels.csv"
+TEST_LABELS_CSV="${LOCAL_DATASET_DIR}/testLabels.csv"
 
-if [[ ! -d "${RESIZED_DIR}" ]]; then
-    echo "Preprocessed images not found at: ${RESIZED_DIR}" >&2
+if [[ ! -d "${RESIZED_DIR}/train" ]]; then
+    echo "Preprocessed train images not found at: ${RESIZED_DIR}/train" >&2
     echo "Run the local preprocessing steps first:" >&2
     echo "  ./scripts/download-dr-dataset.sh" >&2
-    echo "  python scripts/crop_and_resize.py --src data/diabetic-retinopathy-dataset/train --dest data/diabetic-retinopathy-dataset/resized/train" >&2
+    echo "  python scripts/crop_and_resize.py --src data/diabetic-retinopathy-dataset/train --dest data/diabetic-retinopathy-dataset/resized/train --workers 4 --skip-existing --sigmaX 10" >&2
+    echo "  python scripts/crop_and_resize.py --src data/diabetic-retinopathy-dataset/test  --dest data/diabetic-retinopathy-dataset/resized/test  --workers 4 --skip-existing --sigmaX 10" >&2
     exit 1
 fi
 
-if [[ ! -f "${LABELS_CSV}" ]]; then
-    echo "trainLabels.csv not found at: ${LABELS_CSV}" >&2
+if [[ ! -f "${TRAIN_LABELS_CSV}" ]]; then
+    echo "trainLabels.csv not found at: ${TRAIN_LABELS_CSV}" >&2
     echo "Ensure the raw dataset was extracted: ./scripts/download-dr-dataset.sh" >&2
     exit 1
 fi
@@ -34,33 +36,42 @@ echo ""
 
 ssh "${REMOTE_HOST}" "mkdir -p ${REMOTE_DATASET_DIR}"
 
-# Sync preprocessed images only (skip raw train/ and test/ which are large and unneeded)
+# Sync resized train + test images
 rsync -avP --delete \
     -e ssh \
     "${RESIZED_DIR}/" "${REMOTE_HOST}:${REMOTE_DATASET_DIR}/resized/"
 
-# Sync the labels CSV needed to generate train/val splits on FEP
+# Sync label CSVs
 rsync -avP \
     -e ssh \
-    "${LABELS_CSV}" "${REMOTE_HOST}:${REMOTE_DATASET_DIR}/trainLabels.csv"
+    "${TRAIN_LABELS_CSV}" "${REMOTE_HOST}:${REMOTE_DATASET_DIR}/trainLabels.csv"
+
+if [[ -f "${TEST_LABELS_CSV}" ]]; then
+    rsync -avP \
+        -e ssh \
+        "${TEST_LABELS_CSV}" "${REMOTE_HOST}:${REMOTE_DATASET_DIR}/testLabels.csv"
+fi
 
 echo ""
 echo "Dataset sync complete."
 echo "Remote path: ${REMOTE_HOST}:${REMOTE_DATASET_DIR}"
 echo ""
-echo "Next: generate train/val CSV splits on FEP (run once):"
+echo "Next: generate train/val/test CSV splits on FEP (run once):"
 echo "  ssh ${REMOTE_HOST}"
 echo "  cd ~/diabetic-retinopathy-detection"
 echo "  apptainer exec --nv \\"
 echo "    --bind ~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset:/data \\"
 echo "    --bind ~/diabetic-retinopathy-detection:/workspace \\"
 echo "    --pwd /workspace \\"
-echo "    ~/apptainer-images/dr-detection-cu121.sif \\"
+echo "    ~/apptainer-images/dr-detection-cu128.sif \\"
 echo "    python scripts/split_dataset.py \\"
-echo "      --data_dir /data/resized/train \\"
-echo "      --csv_path /data/trainLabels.csv \\"
-echo "      --train_csv_path data/diabetic-retinopathy-dataset/train.csv \\"
-echo "      --val_csv_path data/diabetic-retinopathy-dataset/val.csv"
+echo "      --data-dir /data/resized/train \\"
+echo "      --csv-path /data/trainLabels.csv \\"
+echo "      --test-labels-csv /data/testLabels.csv \\"
+echo "      --test-data-dir /data/resized/test \\"
+echo "      --train-csv-path /data/train.csv \\"
+echo "      --val-csv-path /data/val.csv \\"
+echo "      --test-csv-path /data/test.csv"
 echo ""
 echo "Then submit jobs with:"
 echo "  export DATASET_DIR=~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset"

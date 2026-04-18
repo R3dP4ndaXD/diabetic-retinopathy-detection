@@ -29,9 +29,6 @@ python scripts/inspect_augmentations.py --image sample.jpg --show-fourier
 # Show Fourier high-pass filter (pixel-space, per-channel)
 python scripts/inspect_augmentations.py --image sample.jpg --show-fourier-hpf
 
-# Show Fourier high-pass filter (grayscale output)
-python scripts/inspect_augmentations.py --image sample.jpg --show-fourier-hpf --fourier-hpf-grayscale
-
 # Show all frequency transforms
 python scripts/inspect_augmentations.py --image sample.jpg \\
     --show-wavelets --show-dct --show-fourier --show-fourier-hpf
@@ -257,37 +254,30 @@ def plot_fourier(img: Image.Image, image_size: int, axes_iter,
 
 
 def plot_fourier_hpf(img: Image.Image, image_size: int, axes_iter,
-                     lpf_radius: float = 0.1, grayscale: bool = False) -> None:
+                     lpf_radius: float = 0.1) -> None:
     """
-    Fourier high-pass filter visualisation (pixel-space).
+    Fourier high-pass filter visualisation (pixel-space, per-channel RGB).
 
     Applies FFT → zero-out low-freq circle of radius `lpf_radius * min(H,W)`
     → IFFT → real part.  The result highlights edges, vessels, and fine
     structures while suppressing bulk illumination gradients.
     """
     tensor = _to_tensor(img, image_size)  # [1,3,H,W]
-    transform = FourierHighPassTransform(lpf_radius=lpf_radius, grayscale=grayscale)
+    transform = FourierHighPassTransform(lpf_radius=lpf_radius)
     with torch.no_grad():
-        filtered = transform(tensor)  # [1, 1 or 3, H, W]
+        filtered = transform(tensor)  # [1, 3, H, W]
 
     ax = next(axes_iter)
     ax.imshow(_tensor_to_numpy(tensor[0]))
     ax.set_title("RGB input", fontsize=8)
     ax.axis("off")
 
-    if grayscale:
-        ch = filtered[0, 0].numpy()
+    for ch_idx, name in enumerate(["R-HPF", "G-HPF", "B-HPF"]):
+        ch = filtered[0, ch_idx].numpy()
         ax = next(axes_iter)
-        ax.imshow(ch, cmap="gray", vmin=-1, vmax=1)
-        ax.set_title(f"HPF gray (r={lpf_radius})", fontsize=7)
+        ax.imshow(ch, cmap="RdBu_r", vmin=-1, vmax=1)
+        ax.set_title(f"{name} (r={lpf_radius})", fontsize=7)
         ax.axis("off")
-    else:
-        for ch_idx, name in enumerate(["R-HPF", "G-HPF", "B-HPF"]):
-            ch = filtered[0, ch_idx].numpy()
-            ax = next(axes_iter)
-            ax.imshow(ch, cmap="RdBu_r", vmin=-1, vmax=1)
-            ax.set_title(f"{name} (r={lpf_radius})", fontsize=7)
-            ax.axis("off")
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +300,6 @@ def main() -> None:
     parser.add_argument("--fourier-shift",      action="store_true", help="Apply fftshift (DC at centre) for Fourier display")
     parser.add_argument("--show-fourier-hpf",   action="store_true", help="Show Fourier high-pass filtered image")
     parser.add_argument("--fourier-hpf-radius", type=float, default=0.1, help="Low-freq cutoff radius as fraction of min(H,W) (default: 0.1)")
-    parser.add_argument("--fourier-hpf-grayscale", action="store_true", help="HPF in grayscale (1 channel) instead of per-channel RGB")
     parser.add_argument("--output",   default=None, help="Output path (default: artifacts/augmentation_grid.png)")
     args = parser.parse_args()
 
@@ -332,7 +321,7 @@ def main() -> None:
     n_wav_cells         = (1 + 1 + 3 * args.wav_levels) if show_wavelets else 0
     n_dct_cells         = (1 + args.dct_num_coeffs)     if show_dct      else 0
     n_fourier_cells     = 4 if show_fourier else 0      # RGB + 3 k-space channels
-    n_fourier_hpf_cells = (2 if args.fourier_hpf_grayscale else 4) if show_fourier_hpf else 0
+    n_fourier_hpf_cells = 4 if show_fourier_hpf else 0
 
     section_titles = []
     section_widths = []
@@ -352,8 +341,7 @@ def main() -> None:
         section_titles.append(f"Fourier k-space  (Re, Im, Mag — {shift_label})")
         section_widths.append(n_fourier_cells)
     if n_fourier_hpf_cells:
-        mode_label = "grayscale" if args.fourier_hpf_grayscale else "per-channel"
-        section_titles.append(f"Fourier HPF  (r={args.fourier_hpf_radius}, {mode_label})")
+        section_titles.append(f"Fourier HPF  (r={args.fourier_hpf_radius}, per-channel)")
         section_widths.append(n_fourier_hpf_cells)
 
     total_cells = n_aug_cells + n_mixup_cells + n_wav_cells + n_dct_cells + n_fourier_cells + n_fourier_hpf_cells
@@ -385,11 +373,8 @@ def main() -> None:
         plot_fourier(img1, args.size, axes_iter, shift=args.fourier_shift)
 
     if show_fourier_hpf:
-        mode_label = "grayscale" if args.fourier_hpf_grayscale else "per-channel RGB"
-        print(f"Fourier HPF       : radius={args.fourier_hpf_radius}, {mode_label}")
-        plot_fourier_hpf(img1, args.size, axes_iter,
-                         lpf_radius=args.fourier_hpf_radius,
-                         grayscale=args.fourier_hpf_grayscale)
+        print(f"Fourier HPF       : radius={args.fourier_hpf_radius}, per-channel RGB")
+        plot_fourier_hpf(img1, args.size, axes_iter, lpf_radius=args.fourier_hpf_radius)
 
     for ax in axes_iter:
         ax.axis("off")

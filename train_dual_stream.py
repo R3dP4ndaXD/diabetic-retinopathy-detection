@@ -27,23 +27,24 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.strategies import DDPStrategy
 from omegaconf import DictConfig, OmegaConf
 
+from src.config_checks import validate_training_recipe
 from src.data_module import DRDataModule
 from src.dual_stream_model import DualStreamDRModel
-from src.model import ContiguousGradCallback, EMACallback
-from src.models.factory import ModelFactory
-from src.utils import generate_run_id
+from src.model import ContiguousGradCallback, ModelProfilerCallback
+from src.models.factory import get_normalization_stats, resolve_image_size
+from src.utils import build_run_tag, generate_run_id
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config_dual_stream")
 def train(cfg: DictConfig) -> None:
     run_id  = generate_run_id()
-    run_tag = str(cfg.get("run_tag", "")).replace("-", "_")
-    if run_tag:
-        run_id = f"{run_id}-{run_tag}"
+    run_id  = f"{run_id}-{build_run_tag(cfg)}"
 
     print(f"Run ID    : {run_id}")
     L.seed_everything(cfg.seed, workers=True)
     torch.set_float32_matmul_precision("high")
+
+    validate_training_recipe(cfg, context="train_dual_stream")
 
     train_csv = cfg.train_csv_path
     val_csv   = cfg.val_csv_path
@@ -54,11 +55,9 @@ def train(cfg: DictConfig) -> None:
     if test_csv:
         print(f"Test CSV  : {test_csv}")
 
-    # Use RGB backbone's timm data_config for normalization
-    normalization_mode = cfg.get("normalization_mode", "timm")
-    _tmp = ModelFactory(name=cfg.rgb_model_name, num_classes=5)()
-    timm_data_config = _tmp.data_config if normalization_mode == "timm" else None
-    del _tmp
+    # Normalisation and image size from RGB backbone
+    norm       = get_normalization_stats(cfg.rgb_model_name)
+    image_size = resolve_image_size(cfg.rgb_model_name, cfg.get("image_size"))
 
     # ── DataModule ────────────────────────────────────────────────────────────
     num_classes = 5
@@ -66,12 +65,12 @@ def train(cfg: DictConfig) -> None:
         train_csv_path=train_csv,
         val_csv_path=val_csv,
         test_csv_path=test_csv,
-        image_size=cfg.image_size,
+        norm_mean=norm["mean"],
+        norm_std=norm["std"],
+        image_size=image_size,
         batch_size=cfg.batch_size,
         num_workers=cfg.num_workers,
         balancing_mode=cfg.get("balancing_mode", "weighted_loss"),
-        normalization_mode=normalization_mode,
-        timm_data_config=timm_data_config,
         use_mixup=cfg.get("use_mixup", True),
         mixup_alpha=cfg.get("mixup_alpha", 0.4),
         cutmix_alpha=cfg.get("cutmix_alpha", 1.0),
@@ -94,6 +93,7 @@ def train(cfg: DictConfig) -> None:
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.get("weight_decay", 1e-4),
         use_scheduler=cfg.use_scheduler,
+        scheduler_type=cfg.get("scheduler_type", "auto"),
         freeze_backbone=cfg.get("freeze_backbone", False),
         class_weights=dm.class_weights,
         label_smoothing=cfg.get("label_smoothing", 0.0),
@@ -113,7 +113,6 @@ def train(cfg: DictConfig) -> None:
         dct_num_coeffs=cfg.get("dct_num_coeffs", 6),
         fourier_shift=cfg.get("fourier_shift", False),
         fourier_hpf_radius=cfg.get("fourier_hpf_radius", 0.1),
-        fourier_hpf_grayscale=cfg.get("fourier_hpf_grayscale", False),
         mixup_fn=dm.mixup_fn,
         drop_rate=cfg.get("drop_rate", 0.3),
         drop_path_rate=cfg.get("drop_path_rate", 0.2),
@@ -136,7 +135,7 @@ def train(cfg: DictConfig) -> None:
         mode=cfg.get("checkpoint_monitor_mode", "max"),
         save_top_k=2,
         dirpath=join(cfg.checkpoint_dirpath, run_id),
-        filename="{epoch}-{step}-{val_loss:.2f}-{val_acc:.2f}-{val_kappa:.2f}",
+        filename="{epoch}-{step}-{val_loss:.2f}-{val_acc:.2f}-{val_f1:.2f}-{val_kappa:.2f}",
     )
     callbacks = [
         checkpoint_cb,
@@ -148,9 +147,8 @@ def train(cfg: DictConfig) -> None:
             mode=cfg.get("early_stopping_mode", "min"),
         ),
         ContiguousGradCallback(),
+        ModelProfilerCallback(image_size=image_size),
     ]
-    if cfg.get("use_ema", True):
-        callbacks.append(EMACallback(decay=cfg.get("ema_decay", 0.9998)))
 
     # ── Trainer ───────────────────────────────────────────────────────────────
     num_gpus = cfg.get("num_gpus", 1)

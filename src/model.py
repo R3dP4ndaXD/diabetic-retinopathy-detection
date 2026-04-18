@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import copy
 import io
 import random
+import time
 
 import torch_dct
 
@@ -20,9 +20,17 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
 )
 from timm.data import Mixup
-from timm.utils import ModelEmaV2
 from torch import nn
-from torchmetrics.functional import accuracy, cohen_kappa, f1_score, precision, recall
+import torchmetrics
+from torchmetrics.classification import (
+    MulticlassAUROC,
+    MulticlassAccuracy,
+    MulticlassCalibrationError,
+    MulticlassCohenKappa,
+    MulticlassF1Score,
+    MulticlassPrecision,
+    MulticlassRecall,
+)
 from torchvision.transforms import v2 as T
 
 from src.models.factory import ModelFactory, TIMM_MODEL_REGISTRY
@@ -385,15 +393,11 @@ class FourierHighPassTransform(nn.Module):
     lpf_radius : float
         Fraction of min(H, W) to zero-out around DC.  Smaller → more low-freq
         preserved (weaker high-pass).  Typical range: 0.05–0.25.
-    grayscale : bool
-        If True, convert RGB to grayscale first and output 1 channel.
-        If False, apply per-channel FFT → 3 output channels.
     """
 
-    def __init__(self, lpf_radius: float = 0.1, grayscale: bool = False) -> None:
+    def __init__(self, lpf_radius: float = 0.1) -> None:
         super().__init__()
         self.lpf_radius = lpf_radius
-        self.grayscale = grayscale
         self.register_buffer(
             "rgb_weights",
             torch.tensor([0.2989, 0.5870, 0.1140]).view(1, 3, 1, 1),
@@ -417,11 +421,7 @@ class FourierHighPassTransform(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
         input_dtype = x.dtype
-
-        if self.grayscale:
-            inp = (x * self.rgb_weights).sum(dim=1, keepdim=True).float()  # [B,1,H,W]
-        else:
-            inp = x.float()  # [B, C, H, W]
+        inp = x.float()  # [B, C, H, W] — per-channel
 
         # 2D FFT per channel, shift so DC is at centre
         F_complex = torch.fft.fft2(inp)               # [B, Cout, H, W] complex
@@ -441,66 +441,51 @@ class FourierHighPassTransform(nn.Module):
 
     @property
     def out_channels(self) -> int:
-        return 1 if self.grayscale else 3
+        return 3
 
 
 # ---------------------------------------------------------------------------
-# EMA callback
-# ---------------------------------------------------------------------------
+class ModelProfilerCallback(L.Callback):
+    """Logs parameter count, GFLOPs, and inference throughput once per run."""
 
-class EMACallback(L.Callback):
-    """
-    Exponential Moving Average of model weights.
+    def __init__(self, image_size: int = 224) -> None:
+        self.image_size = image_size
 
-    Swaps to EMA weights before validation/test and restores live weights
-    afterwards so training gradients are unaffected.
-    """
+    def _log_model_profile(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        from fvcore.nn import FlopCountAnalysis
 
-    def __init__(self, decay: float = 0.9998) -> None:
-        super().__init__()
-        self.decay = decay
-        self._ema: ModelEmaV2 | None = None
-        self._backup: dict | None = None
+        total_params     = sum(p.numel() for p in pl_module.parameters())
+        trainable_params = sum(p.numel() for p in pl_module.parameters() if p.requires_grad)
+
+        dummy = torch.zeros(1, 3, self.image_size, self.image_size, device=pl_module.device)
+        flops = FlopCountAnalysis(pl_module, dummy)
+        flops.unsupported_ops_warnings(False)
+        gflops = flops.total() / 1e9
+
+        print(f"\nModel profile:")
+        print(f"  Total params     : {total_params / 1e6:.2f}M")
+        print(f"  Trainable params : {trainable_params / 1e6:.2f}M")
+        print(f"  GFLOPs           : {gflops:.2f}")
+
+        if not trainer.is_global_zero:
+            return
+        if pl_module.logger is None or not hasattr(pl_module.logger, "experiment"):
+            return
+        exp = pl_module.logger.experiment
+        if not hasattr(exp, "add_scalar"):
+            return
+        exp.add_scalar("model/total_params_M",     total_params / 1e6,     0)
+        exp.add_scalar("model/trainable_params_M", trainable_params / 1e6, 0)
+        exp.add_scalar("model/gflops",             gflops,                 0)
 
     def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        self._ema = ModelEmaV2(pl_module, decay=self.decay)
+        self._log_model_profile(trainer, pl_module)
 
-    def on_train_batch_end(
-        self, trainer, pl_module, outputs, batch, batch_idx
-    ) -> None:
-        if self._ema is not None:
-            self._ema.update(pl_module)
-
-    # --- swap to EMA for eval ---
-    def on_validation_epoch_start(self, trainer, pl_module) -> None:
-        self._swap_to_ema(pl_module)
-
-    def on_validation_epoch_end(self, trainer, pl_module) -> None:
-        self._restore_live(pl_module)
-
-    def on_test_epoch_start(self, trainer, pl_module) -> None:
-        self._swap_to_ema(pl_module)
-
-    def on_test_epoch_end(self, trainer, pl_module) -> None:
-        self._restore_live(pl_module)
-
-    def _swap_to_ema(self, pl_module: L.LightningModule) -> None:
-        if self._ema is None:
-            return
-        self._backup = copy.deepcopy(pl_module.state_dict())
-        # timm>=1.0 removed copy_to; keep compatibility with older/newer timm.
-        if hasattr(self._ema, "copy_to"):
-            self._ema.copy_to(pl_module)
-        else:
-            pl_module.load_state_dict(self._ema.module.state_dict())
-
-    def _restore_live(self, pl_module: L.LightningModule) -> None:
-        if self._backup is None:
-            return
-        pl_module.load_state_dict(self._backup)
-        self._backup = None
+    def on_test_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        self._log_model_profile(trainer, pl_module)
 
 
+# ---------------------------------------------------------------------------
 class ContiguousGradCallback(L.Callback):
     """
     Registers backward hooks that make non-contiguous gradients contiguous
@@ -532,21 +517,21 @@ def log_test_results(
     pl_module: L.LightningModule,
     y_pred: np.ndarray,
     y_true: np.ndarray,
+    y_probs: np.ndarray,
     num_classes: int,
+    throughput: float | None = None,
     prefix: str = "test",
 ) -> None:
     """
     Log full-dataset test metrics to TensorBoard:
-      - Scalar: {prefix}/kappa, {prefix}/acc, {prefix}/precision_{i},
-                {prefix}/recall_{i}, {prefix}/f1_{i}  (per class)
+      - Scalar: {prefix}/kappa, {prefix}/acc, {prefix}/auc, {prefix}/ece,
+                {prefix}/precision, {prefix}/recall, {prefix}/f1,
+                {prefix}/throughput_imgs_per_sec
       - Text:   {prefix}/classification_report  (Text tab)
       - Image:  {prefix}/confusion_matrix       (Images tab)
 
     Only runs on global rank 0 (avoids duplicate DDP writes).
-    Flushes the SummaryWriter so data appears even if the process exits
-    immediately after.
     """
-    # Always print on every rank so the Slurm log is complete.
     labels = list(range(num_classes))
     class_names = [f"DR{i}" for i in labels]
 
@@ -555,6 +540,12 @@ def log_test_results(
     per_prec, per_rec, per_f1, _ = precision_recall_fscore_support(
         y_true, y_pred, labels=labels, zero_division=0
     )
+
+    probs_t  = torch.from_numpy(y_probs)
+    labels_t = torch.from_numpy(y_true).long()
+    auc = float(MulticlassAUROC(num_classes=num_classes, average="macro")(probs_t, labels_t))
+    ece = float(MulticlassCalibrationError(num_classes=num_classes, n_bins=15)(probs_t, labels_t))
+
     report = classification_report(
         y_true, y_pred,
         labels=labels,
@@ -564,7 +555,11 @@ def log_test_results(
     )
     print(f"\n{'='*60}\n{prefix.upper()} Results\n{'='*60}")
     print(report)
-    print(f"Quadratic Weighted Kappa: {kappa:.4f}")
+    print(f"Quadratic Weighted Kappa : {kappa:.4f}")
+    print(f"Macro OvR AUC            : {auc:.4f}")
+    print(f"Expected Calibration Err : {ece:.4f}")
+    if throughput is not None:
+        print(f"Throughput               : {throughput:.1f} imgs/sec")
 
     # Only rank 0 writes to TensorBoard.
     if not pl_module.trainer.is_global_zero:
@@ -578,17 +573,20 @@ def log_test_results(
     step = pl_module.global_step
 
     # ── Scalars ──────────────────────────────────────────────────────────────
-    exp.add_scalar(f"{prefix}/kappa", kappa, step)
-    exp.add_scalar(f"{prefix}/acc",   acc,   step)
-    for i, name in enumerate(class_names):
-        exp.add_scalar(f"{prefix}/precision_{name}", float(per_prec[i]), step)
-        exp.add_scalar(f"{prefix}/recall_{name}",    float(per_rec[i]),  step)
-        exp.add_scalar(f"{prefix}/f1_{name}",        float(per_f1[i]),   step)
+    exp.add_scalar(f"{prefix}/kappa",     kappa, step)
+    exp.add_scalar(f"{prefix}/acc",       acc,   step)
+    exp.add_scalar(f"{prefix}/auc",       auc,   step)
+    exp.add_scalar(f"{prefix}/ece",       ece,   step)
+    exp.add_scalar(f"{prefix}/precision", float(per_prec.mean()), step)
+    exp.add_scalar(f"{prefix}/recall",    float(per_rec.mean()),  step)
+    exp.add_scalar(f"{prefix}/f1",        float(per_f1.mean()),   step)
+    if throughput is not None:
+        exp.add_scalar(f"{prefix}/throughput_imgs_per_sec", throughput, step)
 
     # ── Text (visible in TensorBoard → Text tab) ──────────────────────────────
     exp.add_text(
         f"{prefix}/classification_report",
-        f"<pre>{report}\nQuadratic Weighted Kappa: {kappa:.4f}</pre>",
+        f"<pre>{report}\nQWK: {kappa:.4f}  AUC: {auc:.4f}  ECE: {ece:.4f}</pre>",
         step,
     )
 
@@ -640,6 +638,7 @@ class DRModel(L.LightningModule):
         learning_rate: float = 4e-5,
         weight_decay: float = 1e-4,
         use_scheduler: bool = True,
+        scheduler_type: str = "auto",
         freeze_backbone: bool = False,
         class_weights=None,
         label_smoothing: float = 0.0,
@@ -663,18 +662,15 @@ class DRModel(L.LightningModule):
         # Fourier options (used when freq_transform="fourier" or "fourier_hpf")
         fourier_shift: bool = False,
         fourier_hpf_radius: float = 0.1,
-        fourier_hpf_grayscale: bool = False,
         # MixUp (injected from DataModule)
         mixup_fn: Mixup | None = None,
         # Regularisation
         drop_rate: float = 0.3,
         drop_path_rate: float = 0.2,
         layer_lr_decay: float = 0.75,
-        # Supervised Contrastive Learning
-        use_supcon: bool = False,
-        supcon_weight: float = 0.2,
-        supcon_temperature: float = 0.07,
-        supcon_ordinal: bool = True,
+        # Monte Carlo Dropout (uncertainty quantification at test time)
+        mc_dropout_enabled: bool = False,
+        mc_dropout_samples: int = 50,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["class_weights", "mixup_fn"])
@@ -683,6 +679,7 @@ class DRModel(L.LightningModule):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.use_scheduler = use_scheduler
+        self.scheduler_type = scheduler_type
         self.warmup_epochs = warmup_epochs
         self.scheduler_monitor = scheduler_monitor
         self.scheduler_monitor_mode = scheduler_monitor_mode
@@ -690,8 +687,9 @@ class DRModel(L.LightningModule):
         self.tta_runs = tta_runs
         self.layer_lr_decay = layer_lr_decay
         self.mixup_fn = mixup_fn
-        self.use_supcon = use_supcon
-        self.supcon_weight = supcon_weight
+        self.mc_dropout_enabled = mc_dropout_enabled
+        self.mc_dropout_samples = mc_dropout_samples
+        self.loss_name = str(loss_name).lower()
 
         # ── Frequency channel transform (optional) ────────────────────────────
         freq_transform = freq_transform.lower()
@@ -715,7 +713,6 @@ class DRModel(L.LightningModule):
         elif freq_transform == "fourier_hpf":
             self.freq_transform_layer = FourierHighPassTransform(
                 lpf_radius=fourier_hpf_radius,
-                grayscale=fourier_hpf_grayscale,
             )
             input_channels = self.freq_transform_layer.out_channels
         else:
@@ -746,21 +743,34 @@ class DRModel(L.LightningModule):
                 label_smoothing=label_smoothing,
             )
 
-        # ── Supervised Contrastive projection head ────────────────────────────
-        if use_supcon:
-            feat_dim = self.model.get_feature_dim()
-            self.proj_head = nn.Sequential(
-                nn.Linear(feat_dim, feat_dim),
-                nn.ReLU(),
-                nn.Linear(feat_dim, 128),
-            )
-            self.supcon_criterion = SupConLoss(
-                temperature=supcon_temperature,
-                ordinal_weights=supcon_ordinal,
+        # MixUp produces soft targets; store class weights for explicit
+        # weighted soft-target CE during training when needed.
+        if class_weights is not None:
+            self.register_buffer(
+                "_mixup_class_weights",
+                class_weights.detach().clone().float(),
             )
         else:
-            self.proj_head = None
-            self.supcon_criterion = None
+            self._mixup_class_weights = None
+
+        # ── Epoch-level metrics (stateful — accumulate full confusion matrix) ──────
+        _mc = dict(num_classes=num_classes)
+        self._val_metrics = torchmetrics.MetricCollection({
+            # Use micro accuracy so val/test_acc matches sklearn's report accuracy.
+            "acc":       MulticlassAccuracy(**_mc, average="micro"),
+            "kappa":     MulticlassCohenKappa(**_mc, weights="quadratic"),
+            "f1":        MulticlassF1Score(**_mc, average="macro"),
+            "precision": MulticlassPrecision(**_mc, average="macro"),
+            "recall":    MulticlassRecall(**_mc, average="macro"),
+        }, prefix="val_")
+        self._test_metrics = self._val_metrics.clone(prefix="test_")
+
+        # ── Prob-based metrics (require softmax probs, not argmax preds) ─────
+        self._val_prob_metrics = torchmetrics.MetricCollection({
+            "auc": MulticlassAUROC(**_mc, average="macro"),
+            "ece": MulticlassCalibrationError(**_mc, n_bins=15),
+        }, prefix="val_")
+        self._test_prob_metrics = self._val_prob_metrics.clone(prefix="test_")
 
         # ── TTA augmentations ─────────────────────────────────────────────────
         self._tta_transform = T.Compose([
@@ -771,6 +781,9 @@ class DRModel(L.LightningModule):
 
         self._test_preds: list[torch.Tensor] = []
         self._test_targets: list[torch.Tensor] = []
+        self._test_probs: list[torch.Tensor] = []
+        self._test_start_time: float = 0.0
+        self._test_n_samples: int = 0
 
         # store model_name for use in configure_optimizers
         self._model_name = model_name
@@ -782,99 +795,180 @@ class DRModel(L.LightningModule):
             x = self.freq_transform_layer(x)
         return self.model(x)
 
+    def _weighted_soft_target_cross_entropy(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Cross-entropy for soft targets with optional class weighting.
+
+            For MixUp targets with class weights, compute the exact weighted
+            soft-target CE:
+                numerator_i   = -sum_c target_i,c * weight_c * log_prob_i,c
+                denominator_i =  sum_c target_i,c * weight_c
+            and return sum_i numerator_i / sum_i denominator_i.
+        """
+        log_probs = F.log_softmax(logits, dim=1)
+
+        if self._mixup_class_weights is None:
+            per_sample_loss = -(targets * log_probs).sum(dim=1)
+            return per_sample_loss.mean()
+
+        weights = self._mixup_class_weights.to(device=logits.device, dtype=logits.dtype)
+        weighted_targets = targets * weights.unsqueeze(0)
+        per_sample_numerator = -(weighted_targets * log_probs).sum(dim=1)
+        per_sample_denominator = weighted_targets.sum(dim=1)
+        return per_sample_numerator.sum() / per_sample_denominator.sum().clamp_min(1e-8)
+
     # ── Steps ────────────────────────────────────────────────────────────────
 
     def training_step(self, batch):
         x, y = batch
 
-        # ── Supervised Contrastive auxiliary loss ────────────────────────────
-        # Computed before MixUp because SupCon needs hard integer labels.
-        supcon_loss = torch.tensor(0.0, device=x.device)
-        if self.use_supcon and self.proj_head is not None:
-            x2 = self._tta_transform(x)  # second augmented view
-            feats1 = self.proj_head(
-                self.model.forward_head(self.model.forward_features(x),  pre_logits=True)
-            )
-            feats2 = self.proj_head(
-                self.model.forward_head(self.model.forward_features(x2), pre_logits=True)
-            )
-            z = torch.stack([feats1, feats2], dim=1)  # [B, 2, 128]
-            supcon_loss = self.supcon_criterion(z, y)
-
-        # ── Classification loss ───────────────────────────────────────────────
         if self.mixup_fn is not None:
             x, y = self.mixup_fn(x, y)
         logits = self(x)
-        ce_loss = self.criterion(logits, y)
 
-        loss = ce_loss + self.supcon_weight * supcon_loss
-        self.log("train_ce_loss",     ce_loss,     on_step=True, on_epoch=True, sync_dist=True)
-        self.log("train_supcon_loss", supcon_loss, on_step=True, on_epoch=True, sync_dist=True)
-        self.log("train_loss",        loss,        on_step=True, on_epoch=True, prog_bar=True,
-                 sync_dist=True)
+        # MixUp returns soft targets [B, C]. Use explicit soft-target CE so
+        # class_weights remain effective with balancing_mode=weighted_loss.
+        if y.ndim == 2 and self.loss_name == "cross_entropy":
+            loss = self._weighted_soft_target_cross_entropy(logits, y)
+        else:
+            loss = self.criterion(logits, y)
+
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
-    def _compute_metrics(self, preds: torch.Tensor, y: torch.Tensor) -> dict:
-        kwargs = dict(task="multiclass", num_classes=self.num_classes)
-        return {
-            "acc":       accuracy(preds, y, **kwargs),
-            "kappa":     cohen_kappa(preds, y, **kwargs, weights="quadratic"),
-            "precision": precision(preds, y, **kwargs, average="macro"),
-            "recall":    recall(preds, y, **kwargs, average="macro"),
-            "f1":        f1_score(preds, y, **kwargs, average="macro"),
-        }
+    # ── Monte Carlo Dropout ───────────────────────────────────────────────────
+
+    def mc_predict(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run `mc_dropout_samples` stochastic forward passes with dropout enabled.
+
+        Returns
+        -------
+        mean_probs : [B, num_classes]  mean softmax probability across all passes
+        entropy    : [B]               predictive entropy H = -Σ p log p
+                                       (higher → more uncertain; flag for review)
+        """
+        # Enable only Dropout layers; everything else stays in eval mode.
+        for m in self.modules():
+            if isinstance(m, nn.Dropout):
+                m.train()
+
+        with torch.no_grad():
+            passes = torch.stack(
+                [torch.softmax(self(x), dim=1) for _ in range(self.mc_dropout_samples)],
+                dim=0,
+            )  # [S, B, C]
+
+        # Restore full eval mode.
+        self.eval()
+
+        mean_probs = passes.mean(dim=0)  # [B, C]
+        entropy = -(mean_probs * (mean_probs + 1e-10).log()).sum(dim=1)  # [B]
+        return mean_probs, entropy
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         logits = self(x)
         loss = self.criterion(logits, y)
-        preds = torch.argmax(logits, dim=1)
-        metrics = self._compute_metrics(preds, y)
+        probs = torch.softmax(logits, dim=1)
+        preds = torch.argmax(probs, dim=1)
+        self._val_metrics.update(preds, y)
+        self._val_prob_metrics.update(probs, y)
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True,
                  sync_dist=True)
-        for name, value in metrics.items():
-            self.log(f"val_{name}", value, on_step=True, on_epoch=True,
-                     prog_bar=(name in ("acc", "kappa")), sync_dist=True)
+
+    def on_validation_epoch_end(self) -> None:
+        prog_bar_keys = {"val_kappa", "val_acc", "val_f1"}
+        for name, value in {**self._val_metrics.compute(), **self._val_prob_metrics.compute()}.items():
+            self.log(name, value, prog_bar=(name in prog_bar_keys), sync_dist=True)
+        self._val_metrics.reset()
+        self._val_prob_metrics.reset()
 
     def test_step(self, batch, batch_idx):
         x, y = batch
 
-        if self.tta_enabled:
-            avg_probs = torch.zeros(x.size(0), self.num_classes, device=x.device)
-            avg_loss  = 0.0
+        if self.mc_dropout_enabled:
+            probs, entropy = self.mc_predict(x)
+            loss  = self.criterion(torch.log(probs.clamp_min(1e-8)), y)
+            self.log("test_mc_entropy", entropy.mean(), on_step=False, on_epoch=True,
+                     prog_bar=False, sync_dist=True)
+        elif self.tta_enabled:
+            probs    = torch.zeros(x.size(0), self.num_classes, device=x.device)
+            avg_loss = 0.0
             for _ in range(self.tta_runs):
-                aug = self._tta_transform(x)
+                aug    = self._tta_transform(x)
                 logits = self(aug)
-                avg_probs += torch.softmax(logits, dim=1)
-                avg_loss  += self.criterion(logits, y)
-            avg_probs /= self.tta_runs
-            loss = avg_loss / self.tta_runs
-            preds = torch.argmax(avg_probs, dim=1)
+                probs += torch.softmax(logits, dim=1)
+                avg_loss += self.criterion(logits, y)
+            probs /= self.tta_runs
+            loss   = avg_loss / self.tta_runs
         else:
             logits = self(x)
             loss   = self.criterion(logits, y)
-            preds  = torch.argmax(logits, dim=1)
+            probs  = torch.softmax(logits, dim=1)
 
-        metrics = self._compute_metrics(preds, y)
+        preds = torch.argmax(probs, dim=1)
+        self._test_metrics.update(preds, y)
+        self._test_prob_metrics.update(probs, y)
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True,
                  sync_dist=True)
-        for name, value in metrics.items():
-            self.log(f"test_{name}", value, on_step=False, on_epoch=True,
-                     prog_bar=True, sync_dist=True)
 
         self._test_preds.append(preds.detach().cpu())
         self._test_targets.append(y.detach().cpu())
+        self._test_probs.append(probs.detach().cpu())
+        self._test_n_samples += x.size(0)
 
     def on_test_epoch_start(self) -> None:
         self._test_preds = []
         self._test_targets = []
+        self._test_probs = []
+        self._test_n_samples = 0
+        self._test_start_time = time.perf_counter()
 
     def on_test_epoch_end(self) -> None:
+        elapsed = time.perf_counter() - self._test_start_time
+        throughput = self._test_n_samples / elapsed if elapsed > 0 else None
+
+        for name, value in {**self._test_metrics.compute(), **self._test_prob_metrics.compute()}.items():
+            self.log(name, value, prog_bar=True, sync_dist=True)
+        self._test_metrics.reset()
+        self._test_prob_metrics.reset()
+
         if not self._test_preds:
             return
-        y_pred = torch.cat(self._test_preds).numpy()
-        y_true = torch.cat(self._test_targets).numpy()
-        log_test_results(self, y_pred, y_true, self.num_classes)
+        y_pred  = torch.cat(self._test_preds).numpy()
+        y_true  = torch.cat(self._test_targets).numpy()
+        y_probs = torch.cat(self._test_probs).numpy()
+
+        # In DDP, gather rank-local test outputs so report metrics are global.
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            gathered: list[dict] = [None for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather_object(
+                gathered,
+                {
+                    "y_pred": y_pred,
+                    "y_true": y_true,
+                    "y_probs": y_probs,
+                    "n_samples": int(self._test_n_samples),
+                },
+            )
+
+            if not self.trainer.is_global_zero:
+                return
+
+            y_pred = np.concatenate([item["y_pred"] for item in gathered], axis=0)
+            y_true = np.concatenate([item["y_true"] for item in gathered], axis=0)
+            y_probs = np.concatenate([item["y_probs"] for item in gathered], axis=0)
+            global_n_samples = sum(int(item["n_samples"]) for item in gathered)
+            throughput = global_n_samples / elapsed if elapsed > 0 else None
+
+        log_test_results(self, y_pred, y_true, y_probs, self.num_classes, throughput=throughput)
 
     # ── Optimiser ────────────────────────────────────────────────────────────
 
@@ -908,37 +1002,50 @@ class DRModel(L.LightningModule):
 
         configuration: dict = {"optimizer": optimizer, "monitor": self.scheduler_monitor}
 
-        if self.use_scheduler:
-            if self.warmup_epochs > 0:
-                cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer,
-                    T_max=max(1, self.trainer.max_epochs - self.warmup_epochs),
-                )
-                warmup = torch.optim.lr_scheduler.LinearLR(
-                    optimizer, start_factor=1e-2, total_iters=self.warmup_epochs
-                )
-                scheduler = torch.optim.lr_scheduler.SequentialLR(
-                    optimizer,
-                    schedulers=[warmup, cosine],
-                    milestones=[self.warmup_epochs],
-                )
-                configuration["lr_scheduler"] = {
-                    "scheduler": scheduler,
-                    "interval": "epoch",
-                    "frequency": 1,
-                }
-            else:
-                reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                    optimizer,
-                    mode=self.scheduler_monitor_mode,
-                    factor=0.5,   
-                    patience=5,   
-                    threshold=1e-3,
-                    min_lr=1e-7,
-                )
-                configuration["lr_scheduler"] = {
-                    "scheduler": reduce_lr,
-                    "monitor": self.scheduler_monitor,
-                }
+        if not self.use_scheduler:
+            return configuration
+
+        scheduler_type = str(self.scheduler_type).lower()
+        if scheduler_type == "auto":
+            scheduler_type = "warmup_cosine" if self.warmup_epochs > 0 else "plateau"
+
+        if scheduler_type in {"warmup_cosine", "cosine_warmup"}:
+            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=max(1, self.trainer.max_epochs - self.warmup_epochs),
+            )
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer, start_factor=1e-2, total_iters=self.warmup_epochs
+            )
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup, cosine],
+                milestones=[self.warmup_epochs],
+            )
+            configuration["lr_scheduler"] = {
+                "scheduler": scheduler,
+                "interval": "epoch",
+                "frequency": 1,
+            }
+
+        elif scheduler_type in {"plateau", "reduce_on_plateau"}:
+            reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode=self.scheduler_monitor_mode,
+                factor=0.5,
+                patience=5,
+                threshold=1e-3,
+                min_lr=1e-7,
+            )
+            configuration["lr_scheduler"] = {
+                "scheduler": reduce_lr,
+                "monitor": self.scheduler_monitor,
+            }
+
+        else:
+            raise ValueError(
+                f"Unsupported scheduler_type '{self.scheduler_type}'. "
+                "Expected: auto, warmup_cosine, plateau."
+            )
 
         return configuration

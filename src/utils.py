@@ -9,35 +9,6 @@ from PIL import Image, ImageOps
 from zoneinfo import ZoneInfo
 
 
-def compute_laplacian_variance(image_path, crop_threshold=10):
-    """Compute the Laplacian variance of an image (edge/sharpness measure).
-
-    The black background is cropped first so the retina-to-background edge
-    doesn't dominate the variance.
-
-    Args:
-        image_path (str): Path to the input image file.
-        crop_threshold (int): Binary threshold for background removal.
-
-    Returns:
-        float: Variance of the Laplacian. Low = blurry, very high = corrupted.
-    """
-    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
-    if image is None:
-        raise ValueError(f"Could not load image: {image_path}")
-
-    # Crop out the black background before computing the Laplacian
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    _, binary = cv2.threshold(gray, crop_threshold, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
-        gray = gray[y : y + h, x : x + w]
-
-    return cv2.Laplacian(gray, cv2.CV_64F).var()
-
-
 def pad_to_square(image, pad_value=0):
     """Pads an image with a solid color to make it square, preserving aspect ratio."""
     h, w = image.shape[:2]
@@ -150,6 +121,62 @@ def track_files(folder_path, extensions=(".jpg", ".jpeg", ".png")):
                 file_list.append(file_path)
 
     return file_list
+
+def build_run_tag(cfg) -> str:
+    """Build a concise, human-readable run tag from the training config.
+
+    Every meaningful field is always included so the tag stays accurate
+    regardless of what the config defaults happen to be.
+
+    Single-stream example : ``convnext_base_none_samp_ce_mx``
+    Dual-stream example   : ``convnext_base__effb0_xattn_wav_samp_ce_nomx``
+    """
+    parts: list[str] = []
+
+    # ── Backbone(s) ──────────────────────────────────────────────────────────
+    if cfg.get("rgb_model_name"):
+        wav = str(cfg.get("wav_model_name", ""))
+        backbone = str(cfg.rgb_model_name)
+        if wav and wav != cfg.rgb_model_name:
+            backbone += f"__{wav}"
+        parts.append(backbone)
+        fusion_short = {"cross_attention": "xattn"}
+        fusion = str(cfg.get("fusion_type", "mlp"))
+        parts.append(fusion_short.get(fusion, fusion))
+    else:
+        parts.append(str(cfg.model_name))
+
+    # ── Image size (only when explicitly set, otherwise model picks it) ──────
+    if cfg.get("image_size"):
+        parts.append(f"im{cfg.image_size}")
+
+    # ── Frequency transform / stream ─────────────────────────────────────────
+    freq_short = {"wavelet": "wav", "dct": "dct", "fourier": "fft", "fourier_hpf": "hpf", "none": "none"}
+    freq = str(cfg.get("freq_stream") or cfg.get("freq_transform") or "none")
+    parts.append(freq_short.get(freq, freq))
+
+    # ── Class balancing ───────────────────────────────────────────────────────
+    bal_short = {"naive_oversample": "over", "sampler": "samp", "weighted_loss": "wloss", "smote": "smote"}
+    bal = str(cfg.get("balancing_mode", "sampler"))
+    parts.append(bal_short.get(bal, bal))
+
+    # ── Loss ─────────────────────────────────────────────────────────────────
+    loss_short = {"cross_entropy": "ce", "focal": "focal"}
+    loss = str(cfg.get("loss_name", "cross_entropy"))
+    parts.append(loss_short.get(loss, loss))
+
+    # ── Technique flags ───────────────────────────────────────────────────────
+    parts.append("mx" if cfg.get("use_mixup", False) else "nomx")
+    if cfg.get("tta_enabled", False):
+        parts.append("tta")
+
+    # ── Manual suffix: if run_tag is explicitly set in config, append it ─────
+    override = str(cfg.get("run_tag", "")).strip()
+    if override:
+        parts.append(override.replace("-", "_"))
+
+    return "_".join(parts)
+
 
 def generate_run_id(zone: ZoneInfo = ZoneInfo("Europe/Bucharest")) -> str:
     """Generate a unique run ID using current UTC date and time.

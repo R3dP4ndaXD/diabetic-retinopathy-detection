@@ -77,7 +77,7 @@ Resized images (~3–8 GB) go to `data/diabetic-retinopathy-dataset/resized/trai
 ./scripts/build_apptainer_local.sh
 ```
 
-Produces `container/build/dr-detection-cu121.sif` (CUDA 12.1 + all Python deps).
+Produces `container/build/dr-detection-cu128.sif` (CUDA 12.8 + PyTorch 2.9.1 + all Python deps).
 
 Rebuild whenever `container/apptainer.def` or `container/requirements.apptainer.txt` changes.
 
@@ -106,7 +106,7 @@ apptainer exec --nv \
   --bind ~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset:/data \
   --bind ~/diabetic-retinopathy-detection:/workspace \
   --pwd /workspace \
-  ~/apptainer-images/dr-detection-cu121.sif \
+  ~/apptainer-images/dr-detection-cu128.sif \
   python scripts/split_dataset.py \
     --data_dir /data/resized/train \
     --csv_path /data/trainLabels.csv \
@@ -125,7 +125,7 @@ Re-run this whenever you want fresh splits.
 ssh fep
 cd ~/diabetic-retinopathy-detection
 
-export APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu121.sif
+export APPTAINER_IMAGE=~/apptainer-images/dr-detection-cu128.sif
 export DATASET_DIR=~/diabetic-retinopathy-detection/data/diabetic-retinopathy-dataset_ben
 
 ./scripts/submit_slurm_apptainer.sh
@@ -181,6 +181,58 @@ Save per-image predictions:
 python test.py \
   --checkpoint artifacts/dr-model.ckpt \
   --predictions-csv artifacts/test_predictions.csv
+
+## OOF + XGBoost stacking
+
+Train a 5-fold OOF model run (single-stream) and export fold-safe OOF probabilities:
+
+```bash
+python train_oof.py \
+  model_name=convnext_base \
+  oof_num_folds=5 \
+  oof_source_csv_path=/data/train.csv \
+  test_csv_path=/data/test.csv
+```
+
+This writes:
+
+- `artifacts/oof/<run_id>/oof_predictions.csv`
+- `artifacts/oof/<run_id>/test_predictions.csv` (if test CSV is provided)
+- `artifacts/oof/<run_id>/metrics.json`
+
+Train an XGBoost meta-learner from one or more OOF probability CSVs:
+
+```bash
+python train_meta_xgb.py \
+  --oof-csvs artifacts/oof/run-a/oof_predictions.csv artifacts/oof/run-b/oof_predictions.csv \
+  --test-prob-csvs artifacts/oof/run-a/test_predictions.csv artifacts/oof/run-b/test_predictions.csv
+```
+
+This writes `meta_xgb_model.json`, OOF/meta test predictions, and summary metrics under `artifacts/meta_xgb/<run_id>/`.
+
+## Monte Carlo Dropout uncertainty
+
+Single checkpoint:
+
+```bash
+python test.py \
+  --checkpoint artifacts/dr-model.ckpt \
+  --mc-dropout --mc-dropout-runs 20 \
+  --predictions-csv artifacts/test_mc_dropout.csv \
+  --save-probs
+```
+
+Ensemble:
+
+```bash
+python test_ensemble.py \
+  --ensemble-checkpoints ckpt1.ckpt ckpt2.ckpt ckpt3.ckpt \
+  --mc-dropout --mc-dropout-runs 20 \
+  --predictions-csv artifacts/ensemble_mc_dropout.csv \
+  --save-probs
+```
+
+`--mc-dropout` and `--tta` are intentionally mutually exclusive to avoid mixing uncertainty mechanisms.
 ```
 
 ## Monitoring with TensorBoard
@@ -193,7 +245,7 @@ cd ~/diabetic-retinopathy-detection
 apptainer exec \
   --bind ~/diabetic-retinopathy-detection:/workspace \
   --pwd /workspace \
-  ~/apptainer-images/dr-detection-cu121.sif \
+  ~/apptainer-images/dr-detection-cu128.sif \
   tensorboard --logdir logs --host 127.0.0.1 --port 6006
 ```
 

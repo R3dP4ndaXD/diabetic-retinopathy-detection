@@ -13,7 +13,7 @@ seed: 42
 num_workers: 8
 logs_dir: logs
 checkpoint_dirpath: artifacts/checkpoints
-run_tag: "${rgb_model_name}_${wav_model_name}_${fusion_type}_${freq_stream}"
+run_tag: ""   # optional suffix appended to the auto-generated tag (e.g. "exp1")
 
 # ── Dual-stream backbone names ────────────────────────────────────────────────
 rgb_model_name: "efficientnet_b2"     # heavy backbone for RGB stream
@@ -26,7 +26,7 @@ fusion_dropout: 0.3
 fusion_num_heads: 8          # only used when fusion_type="cross_attention"
 
 # ── Frequency stream: "wavelet" | "dct" | "fourier" | "fourier_hpf" ─────────
-freq_stream: "dwt"
+freq_stream: "wavelet"
 # wavelet options (freq_stream: "wavelet")
 wavelet_name: "haar"
 wavelet_mode: "symmetric"
@@ -41,13 +41,10 @@ fourier_shift: true
 # fourier_hpf options (freq_stream: "fourier_hpf")
 #   FFT → zero-out low-freq circle → IFFT → pixel-space edges/vessels
 #   lpf_radius: fraction of min(H,W) to suppress around DC (0.05–0.25)
-#   grayscale: true → 1 output channel; false → 3 per-channel outputs
 fourier_hpf_radius: 0.1
-fourier_hpf_grayscale: false
 
-# ── Image & normalisation ────────────────────────────────────────────────────
-image_size: 260
-normalization_mode: "timm"   # uses rgb_model_name's data_config
+# ── Image ────────────────────────────────────────────────────────────────────
+image_size: null   # null → use rgb_model_name's recommended size
 
 # ── Training recipe ──────────────────────────────────────────────────────────
 batch_size: 64               # lower than single-stream (two forward passes)
@@ -63,26 +60,26 @@ drop_rate: 0.3
 drop_path_rate: 0.2
 freeze_backbone: false
 
-# ── EMA ──────────────────────────────────────────────────────────────────────
-use_ema: false
-ema_decay: 0.9998
-
 # ── Loss ─────────────────────────────────────────────────────────────────────
 loss_name: "cross_entropy"
 focal_gamma: 2.0
 label_smoothing: 0.1
 
 # ── MixUp / CutMix ───────────────────────────────────────────────────────────
-use_mixup: true   # incompatible with SupCon
+use_mixup: true
 mixup_alpha: 0.4
 cutmix_alpha: 1.0
 mixup_prob: 0.5
+
+# ── Recipe checks (avoid conflicting techniques) ────────────────────────────
+strict_compatibility_checks: true
 
 # ── Class balancing ───────────────────────────────────────────────────────────
 balancing_mode: "naive_oversample"
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 use_scheduler: true
+scheduler_type: "auto"   # "auto" | "warmup_cosine" | "plateau"
 scheduler_monitor: "val_loss"
 scheduler_monitor_mode: "min"
 

@@ -28,7 +28,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import cohen_kappa_score
-from torchmetrics.functional import accuracy, cohen_kappa
+from torchmetrics.classification import MulticlassAccuracy, MulticlassCohenKappa
+import torchmetrics
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +133,13 @@ class MetaLearner(L.LightningModule):
 
         self.criterion = nn.CrossEntropyLoss()
 
+        # Stateful epoch-level metrics
+        _mc = dict(num_classes=num_classes)
+        self._val_metrics = torchmetrics.MetricCollection({
+            "kappa": MulticlassCohenKappa(**_mc, weights="quadratic"),
+            "acc":   MulticlassAccuracy(**_mc),
+        }, prefix="meta_val_")
+
     # ── Forward ───────────────────────────────────────────────────────────────
 
     def forward(self, probs: torch.Tensor) -> torch.Tensor:
@@ -184,12 +192,14 @@ class MetaLearner(L.LightningModule):
         logits = self(probs)
         loss = self.criterion(logits, y)
         preds = torch.argmax(logits, dim=1)
-        kappa = cohen_kappa(preds, y, task="multiclass",
-                            num_classes=self.num_classes, weights="quadratic")
-        acc   = accuracy(preds, y, task="multiclass", num_classes=self.num_classes)
-        self.log("meta_val_loss",  loss,  prog_bar=True)
-        self.log("meta_val_kappa", kappa, prog_bar=True)
-        self.log("meta_val_acc",   acc,   prog_bar=True)
+        self._val_metrics.update(preds, y)
+        self.log("meta_val_loss", loss, prog_bar=True)
+
+    def on_validation_epoch_end(self) -> None:
+        metrics = self._val_metrics.compute()
+        self._val_metrics.reset()
+        for name, value in metrics.items():
+            self.log(name, value, prog_bar=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)

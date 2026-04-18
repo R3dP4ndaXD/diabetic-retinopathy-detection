@@ -5,7 +5,7 @@ set -euo pipefail
 REMOTE_HOST="${REMOTE_HOST:-fep}"
 REMOTE_IMAGE_DIR="${REMOTE_IMAGE_DIR:-~/apptainer-images}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOCAL_IMAGE="${1:-${PROJECT_DIR}/container/build/dr-detection-cu121.sif}"
+LOCAL_IMAGE="${1:-${PROJECT_DIR}/container/build/dr-detection-cu128.sif}"
 
 if [[ ! -f "${LOCAL_IMAGE}" ]]; then
     echo "Image not found: ${LOCAL_IMAGE}" >&2

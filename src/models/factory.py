@@ -6,12 +6,53 @@ from timm.data import resolve_data_config
 from torch import nn
 
 # ---------------------------------------------------------------------------
+# Precomputed normalization stats per model
+# Verified by running resolve_data_config on each pretrained checkpoint.
+# Most use standard ImageNet stats; attention-based models (CoAtNet, MaxViT,
+# ViT) were pretrained with 0.5/0.5 normalisation.
+# ---------------------------------------------------------------------------
+_IN = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))   # ImageNet
+_HF = ((0.5,   0.5,   0.5  ), (0.5,   0.5,   0.5  ))   # 0.5-normalised
+
+_NORM_STATS: dict[str, tuple[tuple, tuple]] = {
+    "efficientnetv2_m":  _IN,
+    "efficientnetv2_s":  _IN,
+    "convnext_tiny":     _IN,
+    "convnext_base":     _IN,
+    "convnext_large":    _IN,
+    "coatnet_2":         _HF,
+    "maxvit_base":       _HF,
+    "swin_base":         _IN,
+    "vit_base":          _HF,
+    "efficientnet_b0":   _IN,
+    "efficientnet_b2":   _IN,
+    "mobilenetv3_large": _IN,
+}
+
+
+def get_normalization_stats(model_name: str) -> dict:
+    """Return {"mean": list[float], "std": list[float]} for *model_name*.
+
+    Values are precomputed from each model's timm data_config and stored
+    in ``_NORM_STATS`` — no model instantiation required at call time.
+    """
+    if model_name not in _NORM_STATS:
+        raise ValueError(
+            f"No precomputed normalization stats for '{model_name}'. "
+            f"Add an entry to _NORM_STATS in src/models/factory.py."
+        )
+    mean, std = _NORM_STATS[model_name]
+    return {"mean": list(mean), "std": list(std)}
+
+
+# ---------------------------------------------------------------------------
 # Registry: short name  →  (timm model id, recommended input size)
 # ---------------------------------------------------------------------------
 TIMM_MODEL_REGISTRY: dict[str, tuple[str, int]] = {
     # ── Heavy backbones (RGB stream / single-stream training) ────────────────
-    "efficientnetv2_m":  ("efficientnetv2_rw_m.agc_in1k",                       416),
-    "efficientnetv2_s":  ("efficientnetv2_rw_s.ra2_in1k",                        384),
+    "efficientnetv2_m":  ("efficientnetv2_rw_m.agc_in1k",                         416),
+    "efficientnetv2_s":  ("efficientnetv2_rw_s.ra2_in1k",                         384),
+    "convnext_tiny":     ("convnext_tiny.fb_in22k_ft_in1k",                       224),
     "convnext_base":     ("convnext_base.fb_in22k_ft_in1k",                       224),
     "convnext_large":    ("convnext_large.fb_in22k_ft_in1k",                      224),
     "coatnet_2":         ("coatnet_2_rw_224.sw_in12k_ft_in1k",                    224),
@@ -28,6 +69,30 @@ TIMM_MODEL_REGISTRY: dict[str, tuple[str, int]] = {
 def get_recommended_input_size(model_name: str) -> int | None:
     entry = TIMM_MODEL_REGISTRY.get(model_name)
     return entry[1] if entry else None
+
+
+def resolve_image_size(model_name: str, cfg_image_size: int | None) -> int:
+    """Return the image size to use for training.
+
+    If *cfg_image_size* is set (non-null), that value wins and a warning is
+    printed when it differs from the model's recommendation.  Otherwise the
+    model's recommended size is used.  Falls back to 224 if no recommendation
+    is registered.
+    """
+    recommended = get_recommended_input_size(model_name)
+    if cfg_image_size is not None:
+        size = int(cfg_image_size)
+        if recommended is not None and size != recommended:
+            print(
+                f"[size-mismatch] '{model_name}' recommends {recommended}px "
+                f"but image_size={size} was explicitly set."
+            )
+        return size
+    if recommended is not None:
+        print(f"[image_size] using model default: {recommended}px for '{model_name}'")
+        return recommended
+    print(f"[image_size] no recommendation for '{model_name}', defaulting to 224px")
+    return 224
 
 
 def list_supported_models() -> list[str]:

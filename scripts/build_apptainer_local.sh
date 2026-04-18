@@ -10,7 +10,7 @@ fi
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APPTAINER_DEF="${APPTAINER_DEF:-${PROJECT_DIR}/container/apptainer.def}"
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_DIR}/container/build}"
-IMAGE_NAME="${IMAGE_NAME:-dr-detection-cu121}"
+IMAGE_NAME="${IMAGE_NAME:-dr-detection-cu128}"
 OUTPUT_IMAGE="${OUTPUT_IMAGE:-${OUTPUT_DIR}/${IMAGE_NAME}.sif}"
 BUILD_MODE="${BUILD_MODE:-fakeroot}"
 
